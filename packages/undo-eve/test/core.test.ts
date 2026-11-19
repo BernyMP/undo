@@ -349,6 +349,36 @@ describe("not mounted", () => {
 });
 
 describe("review fixes", () => {
+  it("an interrupted refund is never scheduled", async () => {
+    const { ctx } = await call("undo__stripe_refund", { payment_intent: "pi_alice" });
+    const store = await getStore();
+    store.transition(store.getByCall("s1", ctx.callId)!.rowId, "requested", "failed", { error: "interrupted: it may have partly run" });
+    await expect(stripeRefund(ctx, { payment_intent: "pi_alice" })).rejects.toThrow();
+    const aborted = await call("undo__stripe_refund", { payment_intent: "pi_alice" });
+    const ac = new AbortController();
+    ac.abort();
+    await expect(stripeRefund({ ...aborted.ctx, abortSignal: ac.signal }, { payment_intent: "pi_alice" })).rejects.toThrow(/cancelled/);
+    expect(store.pendingHolds()).toHaveLength(0);
+  });
+
+  it("a capture of a payment someone else already captured is refused, so Undo can't refund it", async () => {
+    fakes.fakes.capture("pi_carol", {});
+    (await getStore()).addMessage("s1", "Carol (pi_carol) asked us to capture her boots.");
+    const { ctx } = await call("undo__stripe_capture", { payment_intent: "pi_carol" });
+    await expect(stripeCapture(ctx, { payment_intent: "pi_carol" })).rejects.toThrow(/can't be captured/);
+  });
+
+  it("a held refund with no token ends failed, not running forever", async () => {
+    const { ctx } = await call("undo__stripe_refund", { payment_intent: "pi_alice" });
+    const { rowId } = await stripeRefund(ctx, { payment_intent: "pi_alice" });
+    setConfig(config({ store: { path: (await import("../extension/lib/runtime.ts")).ledgerPath() }, services: { stripe: { baseUrl: `${fakes.url}/stripe` } } }));
+    await sleep(400);
+    await sweep();
+    const row = (await getStore()).get(rowId)!;
+    expect(row.state).toBe("failed");
+    expect(row.error).toMatch(/no token/);
+  });
+
   it("a refund retried after Stripe forgot the key finds its own refund instead of paying twice", async () => {
     process.env.UNDO_LEASE_MS = "50";
     try {

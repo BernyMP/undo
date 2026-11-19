@@ -91,7 +91,7 @@ document.addEventListener("click", async (e) => {
 function showResult(results) {
   const p = $("plan");
   p.style.display = "block";
-  p.innerHTML = results.map((r) => "<div><b>" + esc(r.rowId ?? "") + "</b> " + esc(r.status ?? r.error) + (r.followUp ? " — " + esc(r.followUp) : "") + (r.reason ? " — " + esc(r.reason) : "") + (r.current ? " — current: <span class='mono'>" + esc(JSON.stringify(r.current)) + "</span>" : "") + "</div>").join("");
+  p.innerHTML = results.map((r) => "<div><b>" + esc(r.rowId ?? "") + "</b> " + esc(r.status ?? r.error) + (r.followUp ? " — " + esc(r.followUp) : "") + (r.reason ? " — " + esc(r.reason) : "") + (r.error ? " — " + esc(r.error) : "") + (r.current ? " — current: <span class='mono'>" + esc(JSON.stringify(r.current)) + "</span>" : "") + "</div>").join("");
 }
 $("say").addEventListener("submit", async (e) => {
   e.preventDefault();

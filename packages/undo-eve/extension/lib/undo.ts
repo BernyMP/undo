@@ -96,7 +96,7 @@ async function finishCancel(store: LedgerStore, row: Row, actor: string): Promis
     if (!store.transition(rowId, "running", "irreversible")) return settled(store, rowId);
     return { status: "irreversible", rowId, followUp: FOLLOW_UP[row.tool] ?? GENERIC_FOLLOW_UP };
   }
-  if (!store.transition(rowId, "running", "cancelled")) return settled(store, rowId);
+  if (!store.transition(rowId, "running", "cancelled", { error: null })) return settled(store, rowId);
   recordInverse(store, row, actor, `cancelled ${row.summary}`);
   return { status: "cancelled", rowId };
 }
@@ -125,7 +125,7 @@ async function finishReverse(store: LedgerStore, row: Row, actor: string, retry:
       if (!store.transition(rowId, "running", "conflict", { current: outcome.conflict })) return settled(store, rowId);
       return { status: "conflict", rowId, current: outcome.conflict };
     }
-    if (!store.transition(rowId, "running", "undone")) return settled(store, rowId);
+    if (!store.transition(rowId, "running", "undone", { error: null })) return settled(store, rowId);
     recordInverse(store, row, actor, `reversed ${row.summary}`, outcome.output);
     return { status: "undone", rowId };
   } catch (err) {

@@ -87,6 +87,8 @@ export function setRecoverer(fn: (store: LedgerStore, row: Row) => Promise<void>
   (globalThis as any)[Symbol.for("undo-eve.recover")] = fn;
 }
 
+const MAX_ATTEMPTS = 5;
+
 /** Keeps a running row's lease fresh while `work` runs, so a sweep doesn't take it over. */
 export async function withLease<T>(store: LedgerStore, rowId: string, work: () => Promise<T>): Promise<T> {
   const beat = setInterval(() => store.touch(rowId), Math.max(1000, Math.floor(leaseMs() / 3)));
@@ -142,12 +144,19 @@ async function execute(store: LedgerStore, running: Row): Promise<void> {
     // Only a definite refusal (4xx other than 409 and 429) means nothing happened. A network
     // error, 5xx, 409 (key in use) or 429 may have gone through: leave it running, and the
     // lease makes a later sweep retry with the same idempotency key.
+    const message = err instanceof Error ? err.message : String(err);
     const status = (err as any)?.status;
-    const refused = typeof status === "number" && status >= 400 && status < 500 && status !== 409 && status !== 429;
-    if (!refused) {
-      console.warn(`[undo] ${rowId}: ${err instanceof Error ? err.message : String(err)}; will retry with the same idempotency key`);
+    const transient =
+      (typeof status === "number" && (status >= 500 || status === 409 || status === 429)) ||
+      (err instanceof TypeError && /fetch failed|network|ECONN|ETIMEDOUT/i.test(`${err.message} ${(err as any).cause ?? ""}`));
+    const attempts = Number(running.ref?.attempts ?? 0) + 1;
+    if (transient && attempts < MAX_ATTEMPTS) {
+      console.warn(`[undo] ${rowId}: ${message}; will retry with the same idempotency key (${attempts}/${MAX_ATTEMPTS})`);
+      store.update(rowId, { error: `${message} (retrying, ${attempts}/${MAX_ATTEMPTS})`, ref: { ...(store.get(rowId)?.ref ?? {}), attempts } });
       return;
     }
-    store.transition(rowId, "running", "failed", { error: err instanceof Error ? err.message : String(err) });
+    store.transition(rowId, "running", "failed", {
+      error: transient ? `${message}. Gave up after ${MAX_ATTEMPTS} tries; it may have gone through, so check the service.` : message,
+    });
   }
 }

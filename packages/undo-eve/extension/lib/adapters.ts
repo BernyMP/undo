@@ -96,10 +96,14 @@ export async function rowForCall(
   return { store, row };
 }
 
-function hold(store: LedgerStore, row: Row, action: unknown, ref?: unknown, until?: number) {
+/**
+ * `revive`: the service already has the action (Resend scheduled the email), so a row the
+ * hook marked failed on an interrupt must still be held, or the effect would run unseen.
+ */
+function hold(store: LedgerStore, row: Row, action: unknown, ref?: unknown, until?: number, revive = false) {
   const undoUntil = until ?? Date.now() + requireConfig().holdMs;
-  // "failed" too: the hook may have marked an interrupted call before the send came back.
-  const held = store.transition(row.rowId, ["requested", "failed"], "held", { undoUntil, action, ref, error: null });
+  const from: Array<"requested" | "failed"> = revive ? ["requested", "failed"] : ["requested"];
+  const held = store.transition(row.rowId, from, "held", { undoUntil, action, ref: { ...(row.ref ?? {}), ...(ref as object) }, error: null });
   if (!held) throw new Error(`undo: row ${row.rowId} is ${store.get(row.rowId)?.state}, not requested`);
   armTimer(held);
   return { status: "scheduled" as const, rowId: held.rowId, undoUntil: new Date(undoUntil).toISOString() };
@@ -122,6 +126,8 @@ export async function stripeRefund(ctx: any, input: { payment_intent: string; am
   const amount = input.amount ?? left;
   if (amount <= 0 || amount > left) throw new Error(`Only $${(left / 100).toFixed(2)} of ${pi.id} can still be refunded.`);
   store.update(row.rowId, { summary: def.summary({ ...input, amount }) });
+  // Nothing has reached Stripe yet: if the turn was cancelled meanwhile, don't schedule it.
+  if (ctx.abortSignal?.aborted) throw new Error("cancelled before the refund was scheduled");
   return hold(store, row, { op: "stripe.refund", params: { payment_intent: pi.id, amount, reason: input.reason } });
 }
 
@@ -143,11 +149,17 @@ export async function resendSend(ctx: any, input: { to: string; subject: string;
   const cfg = requireConfig();
   // One timestamp for both: Resend sends at scheduled_at, and the undo window ends then too.
   const until = Date.now() + cfg.holdMs;
-  const email = await resend.send(
-    { from: cfg.services?.resend?.from ?? "shop@example.com", to: input.to, subject: input.subject, text: input.text, scheduled_at: new Date(until).toISOString() },
-    idemKey(store, row.rowId, "do"),
-  );
-  return hold(store, row, { op: "resend.scheduled", params: { id: email.id } }, { email: email.id }, until);
+  const params = { from: cfg.services?.resend?.from ?? "shop@example.com", to: input.to, subject: input.subject, text: input.text, scheduled_at: new Date(until).toISOString() };
+  const key = idemKey(store, row.rowId, "do");
+  let email: any;
+  try {
+    email = await resend.send(params, key);
+  } catch (err) {
+    // A lost response may hide a scheduled email: ask again with the same key, which replays it.
+    if (err instanceof ServiceError && err.status >= 400 && err.status < 500 && err.status !== 429) throw err;
+    email = await resend.send(params, key);
+  }
+  return hold(store, row, { op: "resend.scheduled", params: { id: email.id } }, { email: email.id }, until, true);
 }
 
 setHeldExecutor("resend.scheduled", async (row) => {
@@ -183,11 +195,14 @@ setHeldExecutor("resend.scheduled", async (row) => {
 export async function stripeCapture(ctx: any, input: { payment_intent: string; amount?: number }) {
   const def = adapterByTool("undo__stripe_capture")!;
   const { store, row } = await rowForCall(ctx, input, { kind: "adapter", strategy: def.strategy, summary: def.summary(input) });
+  const before = await stripe.paymentIntent(input.payment_intent);
+  if (before.status !== "requires_capture") throw new Error(`${before.id} is ${before.status} and can't be captured.`);
   let pi: any;
   try {
     pi = await stripe.capture(input.payment_intent, { amount_to_capture: input.amount }, idemKey(store, row.rowId, "do"));
   } catch (err) {
-    // A lost response may hide a capture that went through: look before calling it failed.
+    // A lost response may hide a capture that went through. It was waiting for capture a moment
+    // ago, so if it is captured now, this call did it.
     if (err instanceof ServiceError && err.status >= 400 && err.status < 500 && err.status !== 429) throw err;
     const now = await stripe.paymentIntent(input.payment_intent).catch(() => undefined);
     if (now?.status !== "succeeded") throw err;
@@ -236,12 +251,16 @@ export async function reverseAdapter(store: LedgerStore, row: Row, retry: boolea
     const piId = row.ref?.payment_intent ?? (row.input as any)?.payment_intent;
     const captured = row.ref?.captured;
     if (!captured) throw new Error(`undo: ${row.rowId} has no captured amount on record`);
-    const refunded = (await stripe.refunds(piId)).reduce((s: number, r: any) => s + r.amount, 0);
-    if (refunded > 0 && !retry) {
+    const key = idemKey(store, row.rowId, "undo");
+    const refunds = await stripe.refunds(piId);
+    const mine = retry ? refunds.find((r: any) => r.metadata?.undo_key === key) : undefined;
+    if (mine) return { ok: true, output: { refund: mine } };
+    const refunded = refunds.reduce((s: number, r: any) => s + r.amount, 0);
+    if (refunded > 0) {
       // Someone refunded this payment after the agent captured it: never refund twice.
       return { conflict: { payment_intent: piId, amount_refunded: refunded, captured } };
     }
-    const refund = await stripe.createRefund({ payment_intent: piId, amount: captured }, idemKey(store, row.rowId, "undo"));
+    const refund = await stripe.createRefund({ payment_intent: piId, amount: captured }, key);
     return { ok: true, output: { refund } };
   }
   throw new Error(`undo: ${row.tool} has no inverse`);
