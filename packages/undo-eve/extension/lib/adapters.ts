@@ -91,6 +91,8 @@ export async function rowForCall(
       state: "requested",
     });
   }
+  // The tool body is running now; an interrupt from here on may have reached the service.
+  row = store.update(row.rowId, { ref: { ...(row.ref ?? {}), started: true } })!;
   return { store, row };
 }
 
@@ -125,7 +127,11 @@ export async function stripeRefund(ctx: any, input: { payment_intent: string; am
 
 setHeldExecutor("stripe.refund", async (row) => {
   const store = await getStore();
-  const refund = await stripe.createRefund(row.action.params, idemKey(store, row.rowId, "do"));
+  const key = idemKey(store, row.rowId, "do");
+  // A retry (after a lost response) may come after Stripe forgot the key: look for our refund first.
+  const mine = row.ref?.attempted ? (await stripe.refunds(row.action.params.payment_intent)).find((r: any) => r.metadata?.undo_key === key) : undefined;
+  if (!mine) store.update(row.rowId, { ref: { ...(row.ref ?? {}), attempted: true } });
+  const refund = mine ?? (await stripe.createRefund(row.action.params, key));
   store.transition(row.rowId, "running", "irreversible", { output: { status: "done", refund }, ref: { refund: refund.id } });
 });
 
@@ -150,6 +156,14 @@ setHeldExecutor("resend.scheduled", async (row) => {
   try {
     email = await resend.get(row.action.params.id);
   } catch (err) {
+    const status = (err as any)?.status;
+    if (typeof status === "number" && status >= 400 && status < 500 && status !== 429) {
+      // A definite refusal (bad token, unknown id): undo can't see this email any more.
+      store.transition(row.rowId, "running", "irreversible", {
+        error: `can't read the email's status from Resend: ${err instanceof Error ? err.message : String(err)}; check it in Resend`,
+      });
+      return;
+    }
     // Couldn't read the status: Resend still owns the send. Look again shortly.
     const again = store.transition(row.rowId, "running", "held", { undoUntil: Date.now() + 2000 });
     if (again) armTimer(again);
@@ -169,7 +183,16 @@ setHeldExecutor("resend.scheduled", async (row) => {
 export async function stripeCapture(ctx: any, input: { payment_intent: string; amount?: number }) {
   const def = adapterByTool("undo__stripe_capture")!;
   const { store, row } = await rowForCall(ctx, input, { kind: "adapter", strategy: def.strategy, summary: def.summary(input) });
-  const pi = await stripe.capture(input.payment_intent, { amount_to_capture: input.amount }, idemKey(store, row.rowId, "do"));
+  let pi: any;
+  try {
+    pi = await stripe.capture(input.payment_intent, { amount_to_capture: input.amount }, idemKey(store, row.rowId, "do"));
+  } catch (err) {
+    // A lost response may hide a capture that went through: look before calling it failed.
+    if (err instanceof ServiceError && err.status >= 400 && err.status < 500 && err.status !== 429) throw err;
+    const now = await stripe.paymentIntent(input.payment_intent).catch(() => undefined);
+    if (now?.status !== "succeeded") throw err;
+    pi = now;
+  }
   store.transition(row.rowId, ["requested", "failed"], "done", {
     error: null,
     output: { status: "done", payment_intent: pi.id, amount: pi.amount_received },

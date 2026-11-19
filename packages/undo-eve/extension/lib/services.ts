@@ -73,8 +73,9 @@ export const stripe = {
   paymentIntent: (id: string) => request("stripe", "GET", `/v1/payment_intents/${encodeURIComponent(id)}`),
   refunds: async (paymentIntent: string) =>
     (await request("stripe", "GET", `/v1/refunds?payment_intent=${encodeURIComponent(paymentIntent)}`)).data as any[],
+  // Tagged with the key, so undo can find its own refund after Stripe forgets the key (24h).
   createRefund: (params: { payment_intent: string; amount?: number; reason?: string }, idempotencyKey: string) =>
-    request("stripe", "POST", "/v1/refunds", params, idempotencyKey),
+    request("stripe", "POST", "/v1/refunds", { ...params, "metadata[undo_key]": idempotencyKey }, idempotencyKey),
   capture: (paymentIntent: string, params: { amount_to_capture?: number }, idempotencyKey: string) =>
     request("stripe", "POST", `/v1/payment_intents/${encodeURIComponent(paymentIntent)}/capture`, params, idempotencyKey),
 };

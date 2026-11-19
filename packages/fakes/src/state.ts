@@ -33,6 +33,7 @@ export type Refund = {
   payment_intent: string;
   status: "succeeded";
   reason: string | null;
+  metadata: Record<string, string>;
   created: number;
 };
 export type BalanceTransaction = {
@@ -43,6 +44,7 @@ export type BalanceTransaction = {
   currency: string;
   description: string | null;
   ending_balance: number;
+  metadata: Record<string, string>;
   created: number;
 };
 export type Coupon = { id: string; object: "coupon"; percent_off: number; duration: string; created: number };
@@ -111,6 +113,17 @@ function pi(id: string, customer: string, amount: number, status: PaymentIntent[
 
 export type State = ReturnType<typeof seed>;
 
+/** Stripe-style metadata: form fields `metadata[key]=value`, or a JSON `metadata` object. */
+function metadataOf(params: Record<string, unknown>): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (params.metadata && typeof params.metadata === "object") Object.assign(out, params.metadata);
+  for (const [k, v] of Object.entries(params)) {
+    const m = k.match(/^metadata\[(.+)\]$/);
+    if (m) out[m[1]!] = String(v);
+  }
+  return out;
+}
+
 export class Fakes {
   state: State = seed();
 
@@ -144,7 +157,7 @@ export class Fakes {
     return this.listRefunds(piId).reduce((sum, r) => sum + r.amount, 0);
   }
 
-  createRefund(params: { payment_intent?: string; amount?: number | string; reason?: string }): Refund {
+  createRefund(params: { payment_intent?: string; amount?: number | string; reason?: string; [k: string]: unknown }): Refund {
     if (!params.payment_intent) throw new FakeError(400, "invalid_request_error", "Missing required param: payment_intent.");
     const p = this.paymentIntent(params.payment_intent);
     if (p.status !== "succeeded") throw new FakeError(400, "invalid_request_error", `PaymentIntent ${p.id} has no captured funds to refund.`);
@@ -159,6 +172,7 @@ export class Fakes {
       payment_intent: p.id,
       status: "succeeded",
       reason: params.reason ?? null,
+      metadata: metadataOf(params),
       created: now(),
     };
     this.state.refunds.push(refund);
@@ -176,7 +190,7 @@ export class Fakes {
     return p;
   }
 
-  createBalanceTransaction(customerId: string, params: { amount?: number | string; currency?: string; description?: string }): BalanceTransaction {
+  createBalanceTransaction(customerId: string, params: { amount?: number | string; currency?: string; description?: string; [k: string]: unknown }): BalanceTransaction {
     const c = this.customer(customerId);
     const amount = Number(params.amount);
     if (!Number.isInteger(amount) || amount === 0) throw new FakeError(400, "invalid_request_error", "Invalid amount.");
@@ -189,6 +203,7 @@ export class Fakes {
       currency: params.currency ?? "usd",
       description: params.description ?? null,
       ending_balance: c.balance,
+      metadata: metadataOf(params),
       created: now(),
     };
     this.state.balanceTransactions.push(tx);

@@ -58,7 +58,7 @@ export async function undoRow(rowId: string, actor = "ledger"): Promise<UndoResu
         rowId,
         reason: row.error?.startsWith("interrupted")
           ? "it was interrupted and may have partly run; check the service by hand"
-          : `it failed before it changed anything: ${row.error ?? "unknown error"}`,
+          : `it failed (${row.error ?? "unknown error"}), so undo has nothing on record to reverse. If that was a timeout or network error, check the service by hand.`,
       };
     case "irreversible":
       return { status: "irreversible", rowId, followUp: FOLLOW_UP[row.tool] ?? GENERIC_FOLLOW_UP };

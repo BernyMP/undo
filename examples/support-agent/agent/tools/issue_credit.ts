@@ -26,12 +26,14 @@ export default reversible({
   undo: async ({ customer, cents }, result, ctx) => {
     const list = await (await fetch(`${base}/${customer}/balance_transactions`, { headers })).json();
     const latest = list.data[0];
-    // On a retry, the newest change may be our own reversal: the same key makes Stripe replay it.
-    if (!ctx.retry && latest?.id !== result.changeId) return ctx.conflict({ latest });
+    // Compare and restore: the newest change must be ours. On a retry it may be our own
+    // reversal (tagged with the key), and then there is nothing left to do.
+    if (ctx.retry && latest?.metadata?.undo_key === ctx.idempotencyKey) return;
+    if (latest?.id !== result.changeId) return ctx.conflict({ latest });
     const res = await fetch(`${base}/${customer}/balance_transactions`, {
       method: "POST",
       headers: { ...headers, "idempotency-key": ctx.idempotencyKey },
-      body: new URLSearchParams({ amount: String(cents), description: "undo store credit" }),
+      body: new URLSearchParams({ amount: String(cents), description: "undo store credit", "metadata[undo_key]": ctx.idempotencyKey }),
     });
     if (!res.ok) throw new Error(`Stripe said ${res.status}`);
   },

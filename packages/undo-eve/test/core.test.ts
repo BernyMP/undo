@@ -208,7 +208,7 @@ describe("reverse strategy", () => {
     await fetch(`${fakes.url}/stripe/v1/refunds`, {
       method: "POST",
       headers: { authorization: "Bearer x", "content-type": "application/x-www-form-urlencoded", "idempotency-key": idemKey(store, rowId, "undo") },
-      body: "payment_intent=pi_carol&amount=5000",
+      body: new URLSearchParams({ payment_intent: "pi_carol", amount: "5000", "metadata[undo_key]": idemKey(store, rowId, "undo") }).toString(),
     });
     store.update(rowId, { ref: { ...store.get(rowId)!.ref, undoStarted: true } });
     expect((await undoRow(rowId)).status).toBe("undone");
@@ -242,7 +242,8 @@ describe("reverse strategy", () => {
       },
       undo: async (input: any, result: any, rctx) => {
         const list = await (await fetch(`${base}/${input.customer}/balance_transactions`, { headers })).json();
-        if (!rctx.retry && list.data[0]?.id !== result.changeId) return rctx.conflict({ latest: list.data[0] });
+        if (rctx.retry && list.data[0]?.metadata?.undo_key === rctx.idempotencyKey) return;
+        if (list.data[0]?.id !== result.changeId) return rctx.conflict({ latest: list.data[0] });
         await fetch(`${base}/${input.customer}/balance_transactions`, {
           method: "POST",
           headers: { ...headers, "idempotency-key": rctx.idempotencyKey },
@@ -321,7 +322,7 @@ describe("lease", () => {
       await fetch(`${fakes.url}/stripe/v1/refunds`, {
         method: "POST",
         headers: { authorization: "Bearer x", "content-type": "application/x-www-form-urlencoded", "idempotency-key": idemKey(store, rowId, "do") },
-        body: new URLSearchParams({ payment_intent: "pi_alice", amount: String(row.action.params.amount) }).toString(),
+        body: new URLSearchParams({ payment_intent: "pi_alice", amount: String(row.action.params.amount), "metadata[undo_key]": idemKey(store, rowId, "do") }).toString(),
       });
       await sleep(100);
       await Promise.all([sweep(), sweep()]);
@@ -348,6 +349,40 @@ describe("not mounted", () => {
 });
 
 describe("review fixes", () => {
+  it("a refund retried after Stripe forgot the key finds its own refund instead of paying twice", async () => {
+    process.env.UNDO_LEASE_MS = "50";
+    try {
+      const { ctx } = await call("undo__stripe_refund", { payment_intent: "pi_alice", amount: 1000 });
+      const { rowId } = await stripeRefund(ctx, { payment_intent: "pi_alice", amount: 1000 });
+      const store = await getStore();
+      const sh = (globalThis as any)[Symbol.for("undo-eve.runtime")];
+      for (const t of sh.timers.values()) clearTimeout(t);
+      sh.timers.clear();
+      await sleep(350);
+      // An earlier attempt reached Stripe; Stripe has since forgotten the idempotency key.
+      const row = store.transition(rowId, "held", "running", { ref: { claim: "run", attempted: true } })!;
+      fakes.fakes.createRefund({ ...row.action.params, "metadata[undo_key]": idemKey(store, rowId, "do") });
+      fakes.fakes.state.idempotency.clear();
+      await sleep(100);
+      await sweep();
+      expect(fakes.fakes.listRefunds("pi_alice")).toHaveLength(1);
+      expect(store.get(rowId)!.state).toBe("irreversible");
+    } finally {
+      delete process.env.UNDO_LEASE_MS;
+    }
+  });
+
+  it("a Resend email undo can no longer see ends irreversible instead of looping", async () => {
+    const { ctx } = await call("undo__resend_send", { to: "bob@example.com", subject: "x", text: "y" });
+    const { rowId } = await resendSend(ctx, { to: "bob@example.com", subject: "x", text: "y" });
+    fakes.fakes.state.emails = {}; // e.g. the fakes restarted
+    await sleep(500);
+    await sweep();
+    const row = (await getStore()).get(rowId)!;
+    expect(row.state).toBe("irreversible");
+    expect(row.error).toMatch(/check it in Resend/);
+  });
+
   it("a developer policy's object-form user-approval (eve's once()) wins over undo's approval", async () => {
     const { stricter } = await import("../extension/lib/policy.ts");
     const theirs = Object.freeze({ type: "user-approval" });

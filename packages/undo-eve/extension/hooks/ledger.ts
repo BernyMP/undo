@@ -88,6 +88,9 @@ export default defineHook({
         });
       } else if (outcome === "interrupted" && row.state === "awaiting_person") {
         store.transition(row.rowId, "awaiting_person", "blocked", { reviewReason: "approval withdrawn; never ran" });
+      } else if (outcome === "interrupted" && (row.kind === "adapter" || row.kind === "reversible") && !row.ref?.started) {
+        // undo's own tools mark when their body starts; this one never did.
+        store.transition(row.rowId, "requested", "blocked", { reviewReason: "never ran: the turn was interrupted first" });
       } else if (outcome === "failed" || outcome === "interrupted") {
         const detail = typeof data.error === "string" ? data.error : (data.error?.message ?? JSON.stringify(data.error ?? outcome));
         const error = outcome === "interrupted" ? `interrupted: it may have partly run (${detail})` : detail;

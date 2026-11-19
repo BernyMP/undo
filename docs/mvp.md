@@ -191,9 +191,10 @@ export default reversible({
   do: async (input, ctx) => credits.add(input, { idempotencyKey: ctx.idempotencyKey }),
   undo: async (input, result, ctx) => {
     const now = await credits.get(input.customer);
-    // On a retry the newest change may be our own reversal; the same key replays it.
-    if (!ctx.retry && now.lastChange !== result.changeId) return ctx.conflict(now);
-    await credits.remove(result.changeId, { idempotencyKey: ctx.idempotencyKey }); // throws on failure
+    // On a retry the newest change may be our own reversal, tagged with the key: nothing left to do.
+    if (ctx.retry && now.lastChange?.undoKey === ctx.idempotencyKey) return;
+    if (now.lastChange?.id !== result.changeId) return ctx.conflict(now);
+    await credits.remove(result.changeId, { idempotencyKey: ctx.idempotencyKey, undoKey: ctx.idempotencyKey }); // throws on failure
   },
 });
 ```
