@@ -47,7 +47,11 @@ async function boot(key: string, p: Promise<LedgerStore>): Promise<LedgerStore> 
   if (!sh.booted.has(key)) {
     sh.booted.add(key);
     // After a restart: run what came due while we were down, and re-arm the rest.
-    queueMicrotask(() => void sweep(store).then(() => store.pendingHolds().forEach((r) => armTimer(r))));
+    queueMicrotask(() =>
+      void sweep(store)
+        .catch((err) => console.warn("[undo] startup sweep failed:", err instanceof Error ? err.message : err))
+        .then(() => store.pendingHolds().forEach((r) => armTimer(r))),
+    );
   }
   return store;
 }
@@ -65,7 +69,9 @@ export function armTimer(row: Row) {
   const delay = Math.max(0, row.undoUntil - Date.now());
   const t = setTimeout(() => {
     sh.timers.delete(row.rowId);
-    void getStore().then((store) => runHeld(store, row.rowId));
+    void getStore()
+      .then((store) => runHeld(store, row.rowId))
+      .catch((err) => console.warn(`[undo] running ${row.rowId} failed:`, err instanceof Error ? err.message : err));
   }, delay + 25);
   (t as any).unref?.();
   sh.timers.set(row.rowId, t);
@@ -101,11 +107,15 @@ export async function sweep(store?: LedgerStore): Promise<number> {
   for (const row of stale) {
     if (!s.claimStale(row.rowId, before)) continue;
     const fresh = s.get(row.rowId)!;
-    if (fresh.ref?.claim === "run") {
-      await execute(s, fresh);
-    } else {
-      const fn = recoverer ?? (globalThis as any)[Symbol.for("undo-eve.recover")];
-      if (fn) await fn(s, fresh);
+    try {
+      if (fresh.ref?.claim === "run") {
+        await execute(s, fresh);
+      } else {
+        const fn = recoverer ?? (globalThis as any)[Symbol.for("undo-eve.recover")];
+        if (fn) await fn(s, fresh);
+      }
+    } catch (err) {
+      console.warn(`[undo] recovering ${fresh.rowId} failed; the next sweep tries again:`, err instanceof Error ? err.message : err);
     }
   }
   return due.length + stale.length;
@@ -129,8 +139,15 @@ async function execute(store: LedgerStore, running: Row): Promise<void> {
   try {
     await withLease(store, rowId, () => exec(running));
   } catch (err) {
-    // 409: the service is still processing this idempotency key; a later sweep retries.
-    if ((err as any)?.status === 409) return;
+    // Only a definite refusal (4xx other than 409 and 429) means nothing happened. A network
+    // error, 5xx, 409 (key in use) or 429 may have gone through: leave it running, and the
+    // lease makes a later sweep retry with the same idempotency key.
+    const status = (err as any)?.status;
+    const refused = typeof status === "number" && status >= 400 && status < 500 && status !== 409 && status !== 429;
+    if (!refused) {
+      console.warn(`[undo] ${rowId}: ${err instanceof Error ? err.message : String(err)}; will retry with the same idempotency key`);
+      return;
+    }
     store.transition(rowId, "running", "failed", { error: err instanceof Error ? err.message : String(err) });
   }
 }

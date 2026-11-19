@@ -59,5 +59,5 @@ export async function apiRows() {
 }
 
 export function pageEnabled() {
-  return requireConfig().page;
+  return requireConfig().page && process.env.EVE_DEV === "1";
 }

@@ -16,6 +16,8 @@ import {
   rowForCall,
   setConfig,
   stricter,
+  statusRank,
+  isRecheck,
   summarize,
   type PolicyCall,
   type ReversibleCtx,
@@ -38,19 +40,18 @@ export function undo(config: UndoConfig = {}) {
  */
 export function undoPolicy(inner?: (ctx: any) => unknown) {
   return async (ctx: any) => {
-    // eve runs the policy again after a person approves: that call runs, so don't re-park it.
-    const before = getConfig() ? (await getStore()).getByCall(ctx.session.id, ctx.callId) : undefined;
-    if (before?.state === "awaiting_person") return decide(ctx as PolicyCall);
     const theirs = inner ? await inner(ctx) : undefined;
     const ours = await decide(ctx as PolicyCall);
+    // On eve's recheck after a person approved, their "ask a person" is already answered.
+    if (isRecheck(ctx) && statusRank(theirs) === 2) return ours;
     const result = stricter(ours, theirs);
-    if (result !== ours) {
+    if (result !== ours && getConfig()) {
       // Their policy was stricter: keep the row honest.
       const store = await getStore();
       const row = store.getByCall(ctx.session.id, ctx.callId);
-      if (row && (result === "denied" || result?.type === "denied")) {
+      if (row && statusRank(result) === 3) {
         store.transition(row.rowId, ["requested", "awaiting_person"], "blocked", { reviewReason: result?.reason ?? "denied by your policy" });
-      } else if (row && (result === "user-approval" || result === true)) {
+      } else if (row && statusRank(result) === 2) {
         store.transition(row.rowId, "requested", "awaiting_person");
       }
     }
@@ -87,7 +88,8 @@ export function reversible<S extends z.ZodType, O>(opts: ReversibleOptions<S, O>
       const idempotencyKey = idemKey(store, row.rowId, "do");
       const result = await opts.do(input, Object.assign(Object.create(ctx), { idempotencyKey, rowId: row.rowId }));
       store.update(row.rowId, { output: result as any });
-      store.transition(row.rowId, "requested", "done");
+      // "failed" too: the hook may have marked an interrupted call before `do` came back.
+      store.transition(row.rowId, ["requested", "failed"], "done", { error: null });
       return { ...(typeof result === "object" && result !== null ? result : { result }), rowId: row.rowId } as any;
     },
   } as any);

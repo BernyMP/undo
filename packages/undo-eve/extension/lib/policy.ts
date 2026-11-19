@@ -42,13 +42,19 @@ export async function decide(call: PolicyCall): Promise<PolicyStatus> {
 
   const existing = store.getByCall(sessionId, call.callId);
   if (existing) {
-    // eve runs the policy again after a person approves a call: let it run, don't review again.
     if (existing.state === "awaiting_person") {
+      // Only eve's recheck after a person's answer lets it run; any other re-run still waits for a person.
+      if (!isRecheck(call)) return "user-approval";
       store.transition(existing.rowId, "awaiting_person", "requested");
       return "approved";
     }
     if (existing.state === "blocked") return { type: "denied", reason: existing.reviewReason ?? "blocked" };
     return undefined;
+  }
+
+  if ((call.session as any).parent && !(globalThis as any)[Symbol.for("undo-eve.warned-child")]) {
+    (globalThis as any)[Symbol.for("undo-eve.warned-child")] = true;
+    console.warn("[undo] recording calls from a subagent session. Their results stay empty unless that subagent mounts undo too (subagents/<name>/extensions/undo.ts with `export default undo()`).");
   }
 
   const c = classify(cfg, call);
@@ -169,12 +175,15 @@ export const REVIEW_CRITERIA = {
 
 /** The stricter of two statuses: denied, then user approval, then approved. */
 export function stricter(a: any, b: any): any {
-  const rank = (s: any) => {
-    if (s === undefined || s === null || s === false || s === "not-applicable" || s?.type === "not-applicable") return 0;
-    if (s === "approved" || s?.type === "approved") return 1;
-    if (s === true || s === "user-approval") return 2;
-    if (s === "denied" || s?.type === "denied") return 3;
-    return 0;
-  };
-  return rank(b) > rank(a) ? b : a;
+  return statusRank(b) > statusRank(a) ? b : a; // on a tie keep `a`; the winner is returned unchanged (eve's once() needs its identity)
+}
+
+export function statusRank(s: any): number {
+  const kind = s === true ? "user-approval" : s === false ? "not-applicable" : typeof s === "object" && s !== null ? s.type : s;
+  return kind === "denied" ? 3 : kind === "user-approval" ? 2 : kind === "approved" ? 1 : 0;
+}
+
+/** eve marks the run of the policy that follows a person's approval. */
+export function isRecheck(ctx: unknown): boolean {
+  return (ctx as any)?.[Symbol.for("eve.approval-evaluation")]?.recheck === true;
 }

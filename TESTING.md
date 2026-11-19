@@ -71,7 +71,7 @@ Press Ctrl-C to stop.
 
 ```bash
 pnpm typecheck   # TypeScript, all packages
-pnpm test        # fakes and undo's core: 22 tests, about 5 s
+pnpm test        # fakes and undo's core: 26 tests, about 5 s
 pnpm test:e2e    # the real agent under eve dev on the fakes: 6 tests, about 2 min
 pnpm eval        # two eve evals (Done #5 and #10)
 pnpm check       # all of the above, then the demo

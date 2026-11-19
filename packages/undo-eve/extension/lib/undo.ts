@@ -4,7 +4,7 @@
 
 import { FOLLOW_UP, cancelHeld, reverseAdapter } from "./adapters.ts";
 import { getReversible, isConflict, makeCtx } from "./registry.ts";
-import { getStore, setRecoverer, withLease } from "./runtime.ts";
+import { armTimer, getStore, setRecoverer, withLease } from "./runtime.ts";
 import { idemKey } from "./store.ts";
 import type { LedgerStore, Row } from "./store.ts";
 
@@ -82,7 +82,16 @@ export async function undoRow(rowId: string, actor = "ledger"): Promise<UndoResu
 
 async function finishCancel(store: LedgerStore, row: Row, actor: string): Promise<UndoResult> {
   const rowId = row.rowId;
-  const result = await withLease(store, rowId, () => cancelHeld(row));
+  let result: "cancelled" | "too_late";
+  try {
+    result = await withLease(store, rowId, () => cancelHeld(row));
+  } catch (err) {
+    // The cancel didn't go through: put the hold back so the Undo can be tried again.
+    const error = err instanceof Error ? err.message : String(err);
+    const back = store.transition(rowId, "running", "held", { error });
+    if (back) armTimer(back);
+    return { status: "failed", rowId, error };
+  }
   if (result === "too_late") {
     if (!store.transition(rowId, "running", "irreversible")) return settled(store, rowId);
     return { status: "irreversible", rowId, followUp: FOLLOW_UP[row.tool] ?? GENERIC_FOLLOW_UP };

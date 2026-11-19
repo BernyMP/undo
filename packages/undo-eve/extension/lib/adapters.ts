@@ -96,7 +96,8 @@ export async function rowForCall(
 
 function hold(store: LedgerStore, row: Row, action: unknown, ref?: unknown, until?: number) {
   const undoUntil = until ?? Date.now() + requireConfig().holdMs;
-  const held = store.transition(row.rowId, "requested", "held", { undoUntil, action, ref });
+  // "failed" too: the hook may have marked an interrupted call before the send came back.
+  const held = store.transition(row.rowId, ["requested", "failed"], "held", { undoUntil, action, ref, error: null });
   if (!held) throw new Error(`undo: row ${row.rowId} is ${store.get(row.rowId)?.state}, not requested`);
   armTimer(held);
   return { status: "scheduled" as const, rowId: held.rowId, undoUntil: new Date(undoUntil).toISOString() };
@@ -145,7 +146,15 @@ export async function resendSend(ctx: any, input: { to: string; subject: string;
 
 setHeldExecutor("resend.scheduled", async (row) => {
   const store = await getStore();
-  const email = await resend.get(row.action.params.id);
+  let email: any;
+  try {
+    email = await resend.get(row.action.params.id);
+  } catch (err) {
+    // Couldn't read the status: Resend still owns the send. Look again shortly.
+    const again = store.transition(row.rowId, "running", "held", { undoUntil: Date.now() + 2000 });
+    if (again) armTimer(again);
+    return;
+  }
   if (email.last_event === "canceled") store.transition(row.rowId, "running", "cancelled");
   else if (email.last_event === "scheduled") {
     // Resend hasn't sent it yet; look again shortly.
@@ -161,7 +170,8 @@ export async function stripeCapture(ctx: any, input: { payment_intent: string; a
   const def = adapterByTool("undo__stripe_capture")!;
   const { store, row } = await rowForCall(ctx, input, { kind: "adapter", strategy: def.strategy, summary: def.summary(input) });
   const pi = await stripe.capture(input.payment_intent, { amount_to_capture: input.amount }, idemKey(store, row.rowId, "do"));
-  store.transition(row.rowId, "requested", "done", {
+  store.transition(row.rowId, ["requested", "failed"], "done", {
+    error: null,
     output: { status: "done", payment_intent: pi.id, amount: pi.amount_received },
     ref: { payment_intent: pi.id, captured: pi.amount_received },
   });

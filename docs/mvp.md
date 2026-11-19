@@ -68,6 +68,7 @@ Every option in one place:
 | `review` | `decide` from `eve/ai` (AI Gateway) | The reviewer: `(call, context) => { verdict, reason }`. The demo passes a scripted one. The default asks `decide` one `choice` question with fixed criteria (`approve`, `wrong_customer`, `wrong_amount`, `not_requested`, `other`); the chosen criterion's text becomes the reason. |
 | `match` | `decide`-based | Turns a sentence into ledger rows. The demo passes `keywordMatch` (no model). The default is one `decide` `choice` over the candidate row ids plus `none` and `several`. |
 | `store` | SQLite at `.undo/ledger.db` | Where the ledger lives. |
+| `page` | on | `false` turns the ledger page and API off. They are unauthenticated, so they only ever answer under `eve dev` and only on loopback. |
 
 ## How a call flows
 
@@ -99,7 +100,7 @@ There is no name-guessing: a connection tool with no annotation that no adapter 
 
 End states: rows from rules 3 and 5 carry no strategy and end `done` with no Undo button; only rule 6 rows end `irreversible`. A redirected call (rule 2) ends `blocked` with its reason, and so does a call a person denies or whose approval is withdrawn. A call cleared but never started by the time its turn ends becomes `blocked` ("never ran"). The hook never overwrites `held`; the executor sets a held row's final state. eve doesn't send some calls to the policy (`eve__` built-ins, `sleep`, `no_reply`, `ask_question`, provider-run tools), so the hook writes their rows after the fact and ends them `done`. If a call reaches the hook with no row and the policy has never run in this process, undo logs "undoPolicy is not set in agent.ts". A subagent that mounts undo calls `undo()` with no options and reuses the root agent's config. If `undo()` never ran, `undoPolicy` denies every call with "mount undo with `undo()` from undo-eve/agent".
 
-Rows are keyed by `session.id` plus `callId`, because eve's `callId` is unique only within a session. eve runs the policy again after a person approves a call; the row is updated, not duplicated, and the reviewer doesn't run again. `approve: "human"` calls never go to the reviewer.
+Rows are keyed by `session.id` plus `callId`, because eve's `callId` is unique only within a session. eve runs the policy again after a person approves a call, and marks that run as a recheck; the row is updated, not duplicated, and the reviewer doesn't run again. Any other re-run of a parked call keeps waiting for a person. With `undoPolicy(yours)`, the stricter answer wins, including eve's object form of "ask a person" that `once()` returns. `approve: "human"` calls never go to the reviewer.
 
 Approval and strategy are separate. Approval decides whether the call runs at all. The strategy decides how it can be undone. The review happens before the hold, and the hold always runs its full length: a reviewer's approval never shortens it.
 
@@ -151,7 +152,7 @@ Rules:
 - `current` in a conflict is the service's newer state, as the `undo` function or adapter read it. `followUp` is one line the agent can act on, such as "issue a new charge or tell the customer".
 - An inverse runs without review, gets its own row with strategy `none`, and points to the original with `undoes: <rowId>`. Undoing an inverse isn't supported in the MVP.
 - Before returning `scheduled`, an adapter checks the service would accept the action now (the payment exists and the amount fits), so most failures come back at once as an error instead of after the hold.
-- A held action that later fails at the service gets state `failed`; `undo__history` lists it first and the ledger page sorts it to the top. Telling the session about a late failure is not in the MVP.
+- When a hold ends and the service refuses the action outright (a 4xx), the row ends `failed`. A network error, a 5xx, a 409 or a 429 may have gone through, so the row stays `running` and a later sweep retries with the same idempotency key. A cancel that errors puts the hold back and returns `failed`, so the Undo can be tried again. `undo__history` lists `failed` rows first, and the ledger page sorts them to the top. Telling the session about a late failure is not in the MVP.
 - The extension's `instructions.md` adds about 120 tokens: say "scheduled" until the state is `done`; check `undo__history` before telling anyone an action happened; use `undo__undo` to fix your own mistakes.
 
 Row states: `requested`, `blocked`, `awaiting_person`, `held`, `running`, `done`, `failed`, `cancelled`, `undone`, `conflict`, `irreversible`.
@@ -160,7 +161,7 @@ Row states: `requested`, `blocked`, `awaiting_person`, `held`, `running`, `done`
 
 ### 1. Record everything
 
-`undoPolicy` writes a row for every call, keyed by session and `callId`, before the call runs; the hook fills in the result. A direct connection call, such as a fake Stripe MCP `create_coupon` with no adapter, is recorded even though undo didn't wrap it. A subagent's own calls get rows from the policy, but their results stay empty unless that subagent mounts undo too; undo logs a warning at startup for each subagent without the mount.
+`undoPolicy` writes a row for every call, keyed by session and `callId`, before the call runs; the hook fills in the result. A direct connection call, such as a fake Stripe MCP `create_coupon` with no adapter, is recorded even though undo didn't wrap it. A subagent's own calls get rows from the policy, but their results stay empty unless that subagent mounts undo too; the first time undo records a call from a subagent session, it logs one line saying so.
 
 ### 2. Adapters
 
@@ -225,7 +226,7 @@ One page served by the extension at `/undo` on the agent's own server. It polls 
 | `POST /undo/api/plan` `{ sentence }` | Returns `{ planId, rows }` or `{ question, candidates }` |
 | `POST /undo/api/plan/:planId/confirm` | Runs the plan |
 
-The page and API are unauthenticated, so they answer only under `eve dev` (which sets `EVE_DEV=1`) and return 404 otherwise, until an `auth` option exists. POSTs must be JSON from the same origin, so another web page can't trigger an undo. Each read of the API also sweeps due holds. If a call reaches an undo tool or hook with no row, undo logs "undoPolicy is not set in agent.ts".
+The page and API are unauthenticated, so they answer only under `eve dev` (which sets `EVE_DEV=1`) and only to requests addressed to localhost, and return 404 otherwise, until an `auth` option exists. That rules out tunnels and DNS rebinding. POSTs must be JSON from the same origin, so another web page can't trigger an undo. Each read of the API also sweeps due holds. If a call reaches an undo tool or hook with no row, undo logs "undoPolicy is not set in agent.ts".
 
 ### 7. Demo: a shop's support agent
 

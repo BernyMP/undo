@@ -133,7 +133,10 @@ describe("undoPolicy", () => {
     setConfig(config({ approve: { stripe__create_coupon: "human" } }));
     const { ctx, status } = await call("stripe__create_coupon", { percent_off: 10 });
     expect(status).toBe("user-approval");
-    expect(await decide({ ...ctx, toolInput: { percent_off: 10 } })).toBe("approved");
+    // A re-run that isn't eve's recheck still waits for a person.
+    expect(await decide({ ...ctx, toolInput: { percent_off: 10 } })).toBe("user-approval");
+    const recheck = { [Symbol.for("eve.approval-evaluation")]: { recheck: true } };
+    expect(await decide({ ...ctx, toolInput: { percent_off: 10 }, ...recheck } as any)).toBe("approved");
     expect(reviews).toEqual([]);
     expect((await getStore()).list()).toHaveLength(1);
   });
@@ -345,6 +348,42 @@ describe("not mounted", () => {
 });
 
 describe("review fixes", () => {
+  it("a developer policy's object-form user-approval (eve's once()) wins over undo's approval", async () => {
+    const { stricter } = await import("../extension/lib/policy.ts");
+    const theirs = Object.freeze({ type: "user-approval" });
+    expect(stricter("approved", theirs)).toBe(theirs);
+    expect(stricter(undefined, theirs)).toBe(theirs);
+    expect(stricter({ type: "denied", reason: "x" }, theirs)).toEqual({ type: "denied", reason: "x" });
+  });
+
+  it("a 5xx from Stripe when a hold ends leaves the row running for a retry with the same key", async () => {
+    process.env.UNDO_LEASE_MS = "50";
+    try {
+      setConfig(config({ services: { stripe: { baseUrl: `${fakes.url}/stripe`, token: "x" }, resend: { baseUrl: `${fakes.url}/resend`, token: "x" } } }));
+      (await getStore()).addMessage("s1", "Hi, this is Alice. Please refund my order pi_alice.");
+      const { ctx } = await call("undo__stripe_refund", { payment_intent: "pi_alice" });
+      const { rowId } = await stripeRefund(ctx, { payment_intent: "pi_alice" });
+      const store = await getStore();
+      // Point the executor at a server that answers 502, as a flaky gateway would.
+      const { createServer } = await import("node:http");
+      const bad = createServer((_q, r) => { r.writeHead(502); r.end("{}"); });
+      await new Promise<void>((r) => bad.listen(0, "127.0.0.1", r));
+      const port = (bad.address() as any).port;
+      setConfig(config({ store: { path: (await import("../extension/lib/runtime.ts")).ledgerPath() }, services: { stripe: { baseUrl: `http://127.0.0.1:${port}`, token: "x" } } }));
+      await sleep(400);
+      await sweep();
+      expect(store.get(rowId)!.state).toBe("running");
+      bad.close();
+      setConfig(config({ store: { path: (await import("../extension/lib/runtime.ts")).ledgerPath() } }));
+      await sleep(100);
+      await sweep();
+      expect(store.get(rowId)!.state).toBe("irreversible");
+      expect(fakes.fakes.listRefunds("pi_alice")).toHaveLength(1);
+    } finally {
+      delete process.env.UNDO_LEASE_MS;
+    }
+  });
+
   it("idempotency keys differ between two ledger files", async () => {
     const a = await getStore();
     setConfig(config());
