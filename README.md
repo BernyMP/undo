@@ -5,18 +5,18 @@ AI agents now take real actions, like purchases, refunds and emails, and when th
 undo is an [eve](https://eve.dev) extension, built on Vercel.
 
 ```bash
-pnpm add @undo/eve
+pnpm add undo-eve
 ```
 
 ```ts
 // agent/extensions/undo.ts
-import undo from "@undo/eve";
+import undo from "undo-eve";
 export default undo({ hold: "2m", defaultApprove: "agent" });
 ```
 
 ```ts
 // agent/agent.ts: add undo's policy
-import { undoPolicy } from "@undo/eve";
+import { undoPolicy } from "undo-eve";
 export default defineAgent({ model: "anthropic/claude-sonnet-5-5", approval: undoPolicy() });
 ```
 

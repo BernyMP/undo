@@ -27,18 +27,18 @@ Sources: Vercel's saga pattern guide (https://vercel.com/i/saga-pattern); eve 1.
 
 ## Shape: undo is an eve extension
 
-undo ships as an eve extension package, `@undo/eve`. An agent installs it and adds two files:
+undo ships as an eve extension package. `@undo` on npm belongs to another user (checked 2026-11-19), so the working name is `undo-eve` (free on npm today); Berny picks the published name. An agent installs it and adds two files:
 
 ```ts
 // agent/extensions/undo.ts
-import undo from "@undo/eve";
+import undo from "undo-eve";
 export default undo({ hold: "2m", defaultApprove: "agent", slack: "slack/undo" });
 ```
 
 ```ts
 // agent/agent.ts
 import { defineAgent } from "eve";
-import { undoPolicy } from "@undo/eve";
+import { undoPolicy } from "undo-eve";
 export default defineAgent({ model: "anthropic/claude-sonnet-5-5", approval: undoPolicy() });
 ```
 
@@ -51,16 +51,16 @@ The second file is needed because an extension can't set agent-wide config; eve'
 | Record every call | Extension hook (`hooks/ledger.ts`) on `call.started` / `call.settled`; `call(ctx.view, callId)` gives name, input, output, state |
 | Decide before a call runs | Agent-wide `approval` policy (`undoPolicy`): returns `approved`, `{ type: "denied", reason }` or `user-approval` |
 | Classify unknown tools | MCP `toolAnnotations` (`readOnlyHint`, `destructiveHint`) passed to the policy |
-| Quick checks in the policy | `decide` from `eve/ai` (AI Gateway, default `typesafe-ai/jev`) |
-| Hold an action, reply at once | Workflow tool with `task()`: the model gets a receipt now and the result later as `task.result`; `sleep` holds no compute |
-| Reviewer during a hold | `ctx.agent("undo__reviewer")` from inside the workflow tool |
+| Quick checks in the policy | A `check` function. Default: `decide` from `eve/ai` (AI Gateway, `typesafe-ai/jev`). Tests and the demo pass a scripted check, so they make no model calls. |
+| Hold an action, reply at once | The adapter is an `execute` workflow tool. It runs the review (when required), then starts a separate hold run with `start()` from a step and returns `{ status: "scheduled", rowId, undoUntil }`. The hold run sleeps (no compute) until `undoUntil`, a release, or a cancel. The turn doesn't wait for the hold, so a 2-minute hold doesn't keep the agent's turn open (eve holds a turn open while any `task()` works). |
+| Reviewer before the hold | `ctx.agent("undo__reviewer").send(..., { outputSchema })` from the adapter's workflow body; `ctx.agent()` itself is not gated by the approval policy |
 | Reviewer and undo agents | Extension subagents: `undo__reviewer`, `undo__undoer` |
 | The agent undoing its own mistake | Extension tools: `undo__undo`, `undo__history` |
 | Sentence undo and human approvals in Slack | eve Slack channel with `connectSlackCredentials("slack/undo")` from `@vercel/connect/eve`; eve renders approval cards with Approve / Deny |
 | Stripe, Resend and other services | eve connections (MCP or OpenAPI) with `connect("<connector>")` from Vercel Connect; tokens, refresh and consent handled by Connect. Stripe: `mcp`, `api-key`. Resend: `oauth`, `mcp`, `api-key`. |
 | Know when an action became final | Connect trigger forwarding: Resend supports it (e.g. a delivered email turns its row `irreversible`). Stripe doesn't through Connect; undo reads Stripe state in the inverse instead. |
 | Keys for services Connect doesn't list | Vercel Marketplace integrations, read as env vars (not needed for the MVP) |
-| Ledger store | One Vercel Workflow run per recorded action (its inverse, undo window and undo hook), listed with the World SDK; no extra database |
+| Ledger store | A `LedgerStore` interface. The MVP ships a local SQLite file (`node:sqlite`, `.undo/ledger.db`). Held actions are also Workflow runs (hold, release and cancel hooks). A hosted store on Vercel (Marketplace Postgres or Redis) comes after the MVP and needs Berny's pick, since it can cost money. |
 | Daily digest | Extension schedule `undo__digest`: what became final, what's still undoable, conflicts |
 | Ledger UI | Next.js with `withEve`, the eve client SDK for live sessions |
 | Tests | eve evals with tool stubs |
@@ -71,7 +71,7 @@ The second file is needed because an extension can't set agent-wide config; eve'
 
 | Strategy | When | How in eve | Example |
 |---|---|---|---|
-| **Cancel** | Before the effect happens | An undo adapter is a `task()` workflow tool: it returns `{ status: "scheduled", undoUntil }` at once, holds (default 2 min), then runs. Undo in the hold = it never happened. The reviewer can release it early. | Resend email; Stripe refund |
+| **Cancel** | Before the effect happens | An undo adapter returns `{ status: "scheduled", rowId, undoUntil }` and holds the effect in its own Workflow run (default 2 min), then runs it. Undo in the hold = it never happened. A reviewer approval releases it early. | Resend email; Stripe refund |
 | **Reverse** | After it happened, an inverse exists | The inverse runs as a durable step with an idempotency key, compare-and-restore (a newer write by someone else is a conflict, never overwritten). | Stripe: cancel an authorization, refund a capture |
 | **None** | No inverse exists | It runs and the row is `irreversible`. Undo can offer a follow-up (a correction email), never pretend. | A connection tool with no adapter; a refund after its hold |
 
@@ -82,7 +82,7 @@ Approval is separate from the strategy. `undoPolicy` decides for every call:
 | Call | Default |
 |---|---|
 | `readOnlyHint: true`, or a known read tool | runs, recorded |
-| undo adapter (has a hold) | runs as a task; the reviewer checks during the hold |
+| undo adapter (has a hold) | runs; the adapter asks the reviewer first when its approve is `agent` |
 | connection tool with no adapter, or `destructiveHint: true` | `approve: "agent"`: a quick `decide` check against the session and ledger; denied calls get the reason back |
 | any tool the developer set to `approve: "human"` | `user-approval`: eve pauses the call; Approve / Deny in Slack or the ledger UI |
 
@@ -113,7 +113,7 @@ Adapters are keyed by Vercel Connect service name (`stripe`, `resend`), so the a
 
 ```ts
 // agent/tools/issue_credit.ts
-import { reversible } from "@undo/eve";
+import { reversible } from "undo-eve";
 
 export default reversible({
   description: "Give a customer store credit.",
@@ -134,7 +134,7 @@ It compiles to an eve workflow tool, so `do` and `undo` are durable steps.
 ### 4. The reviewer (`undo__reviewer` subagent)
 
 - Read-only: the ledger, the session's messages (e.g. the ticket), and read tools from the agent's connections (the Stripe customer and order).
-- Called from each held adapter call with `ctx.agent("undo__reviewer")`. Approve releases the action early; block cancels it, and the acting agent gets `{ status: "blocked", reason }` as the task result and replans.
+- Called by each adapter whose approve is `agent`, with `ctx.agent("undo__reviewer")`, before the hold starts. Approve releases the action at once; block means it never runs, and the acting agent gets `{ status: "blocked", reason }` as the tool result and replans.
 - Verdict and reason are stored on the ledger row. It can use a different model from the acting agent.
 
 ### 5. The undoer (`undo__undoer` subagent) and `undo__undo`
@@ -150,7 +150,7 @@ It compiles to an eve workflow tool, so `do` and `undo` are durable steps.
 
 ### 7. Ledger UI
 
-Next.js page: everything every agent did, with state (`held`, `in review`, `blocked`, `done`, `undone`, `conflict`, `irreversible`), the reviewer's verdict, a countdown on held rows, and **Undo**, **Undo run**, **Undo to here**. Live through the eve client SDK.
+Next.js page (a plain local page in the MVP): everything every agent did, with state (`held`, `in review`, `blocked`, `done`, `undone`, `conflict`, `irreversible`), the reviewer's verdict, a countdown on held rows, and **Undo**, **Undo run**, **Undo to here**. Live through the eve client SDK.
 
 ### 8. Demo: a shop's support agent
 
@@ -189,17 +189,33 @@ vercel connect create resend --connection-method mcp --name undo-resend --trigge
 vercel connect create slack --name undo
 ```
 
-## Check before building
+## Checked before building (2026-11-19, eve 1.1.0 docs)
 
-- Which Stripe and Resend MCP tools carry `readOnlyHint` / `destructiveHint`, and whether the MCP or the API key method gives the adapters what they need.
-- Stripe and Resend cancel behavior: scheduled-email cancel, refund cancel limits, authorization cancel.
-- Whether an approval policy can read extension state (for ledger lookups), or must call out to a step.
-- eve 1.1.0 changes to extensions, hooks, approval and workflow tools.
+- **eve 1.1.0 changes** (released 2026-11-18): `defineModel` with connection-style auth, `ctx.waitUntil` in channel handlers, `eve dev --no-ui` prints `[DEV] ready at <url>`, idle sandboxes stop after 5 minutes, and the local Workflow world moved to one SQLite file (`.eve/.workflow-data/world.db`). None changes extensions, hooks, approval policies or workflow tools.
+- **Extensions can't set agent config.** Confirmed: the extension root can't declare agent configuration, so `approval: undoPolicy()` in `agent.ts` stays.
+- **The agent-wide policy gates every call**, including extension, workflow, connection and local subagent calls, and gets `toolAnnotations` for connection tools. It is async, so it reads the ledger store directly; it doesn't need extension state. Not gated: `ctx.agent()` in workflow code, task controls, `ask_question`, sign-ins.
+- **Hooks don't see subagent turns.** A parent `call.settled` hook records the call to the subagent, not the subagent's own calls. A subagent's own calls are recorded when that subagent mounts undo too (`subagents/<id>/extensions/undo.ts`). undo's own reviewer and undoer are read-only and need no ledger of their own.
+- **Steps can't read or write `defineState`.** The ledger therefore lives in undo's store, not in eve state.
+- **`task()` holds the turn open** until the task ends, which is why holds run in their own Workflow run (see the mapping table).
+- **Scripted models**: `mockModel` from `eve/evals` scripts replies and tool calls, so the demo and evals run with no model provider.
+- **Stripe**: a refund can't be cancelled once Stripe accepts it (only a refund in `requires_action` can be), so `undo__stripe_refund` holds before it calls Stripe. A manual-capture PaymentIntent can be cancelled before capture. Stripe takes `Idempotency-Key` on every POST.
+- **Resend**: an email sent with `scheduled_at` can be cancelled until it is sent (`POST /emails/{id}/cancel`); after that it can't.
+- **Not checked yet**: which Stripe and Resend MCP tools carry `readOnlyHint` / `destructiveHint`. That needs a real connection. Until then the policy falls back to a list of known write tool names per service.
+
+## Local MVP (what Berny tests first)
+
+The first build runs on one machine, spends nothing and needs no accounts:
+
+- **Fakes** for Stripe, Resend and Slack in one local server, with test-mode behavior: idempotency keys, a scheduled email that can be cancelled until it sends, a refund that can't be undone once it's final, and a capture that can be refunded.
+- **Scripted models** (`mockModel`) for the support agent, the reviewer and the undoer. No AI Gateway calls.
+- **One command** runs the demo end to end and prints the ledger.
+- **The ledger UI** runs locally with an Undo button on every row.
+- Swapping the fakes for Vercel Connect connections, and the scripted models for real ones, is a config change described in the README; it needs Berny's go-ahead because it can spend money.
 
 ## Done looks like
 
-1. The demo runs on Vercel with no person until step 3.
-2. Adding undo to an eve agent is `pnpm add @undo/eve` plus the two files above.
+1. The demo runs with no person until step 3: locally on fakes in the MVP, on Vercel once Berny approves connectors and a deploy.
+2. Adding undo to an eve agent is `pnpm add undo-eve` plus the two files above.
 3. With default settings, no call waits for a person.
 4. A direct Stripe MCP write is recorded; with an adapter, it is redirected to the adapter.
 5. The reviewer blocks the wrong-customer refund in an eve eval and in the live demo; Stripe never sees it.
