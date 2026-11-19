@@ -59,12 +59,12 @@ export type Email = {
 };
 
 export class FakeError extends Error {
-  constructor(
-    public status: number,
-    public type: string,
-    message: string,
-  ) {
+  status: number;
+  type: string;
+  constructor(status: number, type: string, message: string) {
     super(message);
+    this.status = status;
+    this.type = type;
   }
 }
 

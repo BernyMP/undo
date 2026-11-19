@@ -118,6 +118,7 @@ export async function stripeRefund(ctx: any, input: { payment_intent: string; am
   const left = pi.amount_received - refunded - pendingHolds;
   const amount = input.amount ?? left;
   if (amount <= 0 || amount > left) throw new Error(`Only $${(left / 100).toFixed(2)} of ${pi.id} can still be refunded.`);
+  store.update(row.rowId, { summary: def.summary({ ...input, amount }) });
   return hold(store, row, { op: "stripe.refund", params: { payment_intent: pi.id, amount, reason: input.reason } });
 }
 

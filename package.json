@@ -3,12 +3,15 @@
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.9.0",
-  "engines": { "node": ">=24" },
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "demo": "pnpm --filter support-agent demo",
-    "fakes": "pnpm --filter undo-fakes start",
-    "test": "pnpm -r --if-present test",
+    "test": "pnpm --filter undo-fakes --filter undo-eve test",
     "test:e2e": "pnpm --filter support-agent test:e2e",
-    "typecheck": "pnpm -r --if-present typecheck"
+    "eval": "pnpm --filter support-agent eval",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "check": "pnpm typecheck && pnpm test && pnpm test:e2e && pnpm eval && pnpm demo"
   }
 }

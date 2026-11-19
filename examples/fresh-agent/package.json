@@ -1,0 +1,9 @@
+{
+  "name": "fresh-agent",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Done #2: a fresh eve agent with undo-eve plus the two files, and nothing else.",
+  "scripts": { "build": "eve build", "dev": "eve dev" },
+  "dependencies": { "ai": "7.0.177", "eve": "1.1.0", "undo-eve": "workspace:*", "zod": "4.6.7" }
+}

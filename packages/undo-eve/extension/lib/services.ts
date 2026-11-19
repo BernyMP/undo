@@ -5,13 +5,14 @@
 import { requireConfig, type ServiceConfig } from "./config.ts";
 
 export class ServiceError extends Error {
-  constructor(
-    public service: string,
-    public status: number,
-    message: string,
-    public body?: unknown,
-  ) {
+  service: string;
+  status: number;
+  body?: unknown;
+  constructor(service: string, status: number, message: string, body?: unknown) {
     super(message);
+    this.service = service;
+    this.status = status;
+    this.body = body;
   }
 }
 

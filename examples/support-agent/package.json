@@ -1,0 +1,27 @@
+{
+  "name": "support-agent",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "undo's demo: a shop's support agent on fake Stripe and Resend with scripted models.",
+  "scripts": {
+    "dev": "eve dev",
+    "build": "eve build",
+    "demo": "node scripts/demo.ts",
+    "test:e2e": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "eval": "eve eval"
+  },
+  "dependencies": {
+    "ai": "7.0.177",
+    "eve": "1.1.0",
+    "undo-eve": "workspace:*",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "24.x",
+    "typescript": "7.0.2",
+    "undo-fakes": "workspace:*",
+    "vitest": "5.1.1"
+  }
+}
