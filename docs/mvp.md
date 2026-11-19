@@ -19,8 +19,8 @@ Sources: Vercel's saga pattern guide (https://vercel.com/i/saga-pattern); the ev
 
 | Promise | Rule |
 |---|---|
-| Records everything an agent does | Every call the root agent makes (its own tools, extension tools, connection tools, calls to subagents) gets a ledger row: input, result, time, session, state, and how to reverse it. A subagent's own calls get rows when that subagent mounts undo too. |
-| Reverse any mistake | Every row gets its strategy (`cancel`, `reverse` or `none`) before the call runs, never after. `none` rows are labelled `irreversible`. |
+| Records everything an agent does | Every call eve reports to undo's policy or hook (the agent's own tools, extension tools, connection tools, calls to subagents, eve's built-ins) gets a ledger row: input, result, time, session, state, and how to reverse it. A subagent's own calls get rows when that subagent mounts undo too. |
+| Reverse any mistake | Every write gets its strategy (`cancel`, `reverse` or `none`) before the call runs, never after. A write with strategy `none` is labelled `irreversible`. |
 | Agents stay unattended | No call waits for a person unless the developer set `approve: "human"` for it. |
 | In one click | Every row that can still be undone has an Undo button. |
 | In one sentence | "cancel the email to Bob", from a person or from the agent itself, finds the rows and reverses them; a vague sentence gets a question back. |
@@ -36,7 +36,7 @@ import { undo } from "undo-eve/agent";
 export default undo({
   hold: "2m",                                // how long cancel-strategy actions wait
   adapters: { stripe: "stripe", resend: "resend" }, // service -> the agent's connection name
-  approve: { stripe__create_coupon: "human" }, // per-tool overrides; default comes from defaultApprove
+  approve: { stripe__create_coupon: ({ input }) => (input.percent_off > 50 ? "human" : "agent") },
   defaultApprove: "agent",
 });
 ```
@@ -60,12 +60,13 @@ Every option in one place:
 |---|---|---|
 | `hold` | `"2m"` | How long a `cancel` action waits before it runs. |
 | `defaultApprove` | `"agent"` | Approval for writes that have no per-tool setting: `"none"`, `"agent"` or `"human"`. |
-| `approve` | `{}` | Per-tool approval by final tool name, or a rule: `({ input }) => input.amount > 50_000 ? "human" : "agent"`. Wins over a tool's own `approve`. |
+| `approve` | `{}` | Per-tool approval by final tool name. Each value is an approve or a rule, e.g. `{ issue_credit: ({ input }) => input.cents > 50_000 ? "human" : "agent" }`. Wins over a tool's own `approve` and an adapter's default. |
 | `reads` | `[]` | Extra tool names to treat as reads (no review, nothing to undo). |
+| `subagents` | `[]` | Names of your declared subagents. eve's policy can't tell a subagent call from a tool call, so list them here to record them without review. |
 | `adapters` | `{}` | Which connection each adapter service uses, e.g. `{ stripe: "stripe" }`. |
 | `services` | Vercel Connect | How adapters reach each service: `{ stripe: { baseUrl, token } }`. The demo points these at the local fakes. |
-| `review` | `decide` from `eve/ai` (AI Gateway) | The reviewer: `(call, context) => { verdict, reason }`. The demo passes a scripted one. |
-| `match` | `decide`-based | Turns a sentence into ledger rows. The demo passes a scripted one. |
+| `review` | `decide` from `eve/ai` (AI Gateway) | The reviewer: `(call, context) => { verdict, reason }`. The demo passes a scripted one. The default asks `decide` one `choice` question with fixed criteria (`approve`, `wrong_customer`, `wrong_amount`, `not_requested`, `other`); the chosen criterion's text becomes the reason. |
+| `match` | `decide`-based | Turns a sentence into ledger rows. The demo passes `keywordMatch` (no model). The default is one `decide` `choice` over the candidate row ids plus `none` and `several`. |
 | `store` | SQLite at `.undo/ledger.db` | Where the ledger lives. |
 
 ## How a call flows
@@ -87,14 +88,16 @@ model calls a tool
 
 `undoPolicy` sorts each call by the first rule that matches:
 
-1. undo's own tools: `undo__history` and `undo__undo` run with no review; adapters use their own strategy and approve.
+1. undo's own tools: `undo__history` and `undo__undo` run with no review; adapters use their own strategy, and approve from the `approve` option, else the adapter's default.
 2. A connection write that an adapter covers (such as `stripe__create_refund`): denied with the adapter's name.
 3. Reads: MCP tools with `readOnlyHint: true`, the read tools each adapter lists for its service (such as `stripe__retrieve_customer`), eve's `read_file`, `glob`, `grep`, `web_search`, `web_fetch`, `eve__search`, `eve__skill` and task controls, and anything in `reads`. They run with no review; the row records them.
 4. `reversible()` tools: strategy `reverse`, approve from the `approve` option, else the tool's own, else `defaultApprove`.
-5. eve's sandbox tools (`bash`, `write_file`, `edit_file`) and calls to subagents: recorded with approve `none` and strategy `none`, since their effects stay in the sandbox or in the subagent's own rows.
+5. eve's sandbox tools (`bash`, `write_file`, `edit_file`) and calls to subagents listed in `subagents`: recorded, not reviewed. eve's default sandbox can reach the network, so if `bash` can reach outside services, set the sandbox's `networkPolicy: "deny-all"` or put `bash` in `approve`.
 6. Everything else, including connection writes with no adapter and your plain tools: strategy `none` (labelled `irreversible`) and approve from the `approve` option, else `defaultApprove`.
 
-There is no name-guessing: a connection tool with no annotation that no adapter lists is treated as a write until you add it to `reads`.
+There is no name-guessing: a connection tool with no annotation that no adapter lists is treated as a write until you add it to `reads`. So is a plain tool of yours: the first time undo reviews one of your tools as a write, it logs one line naming it ("add read-only tools to `reads`").
+
+End states: rows from rules 3 and 5 carry no strategy and end `done` with no Undo button; only rule 6 rows end `irreversible`. A redirected call (rule 2) ends `blocked` with its reason. eve doesn't send some calls to the policy (`eve__search`, `eve__skill`, task controls, `ask_question`), so the hook writes their rows after the fact and ends them `done`. For any other call that reaches the hook with no row, undo logs "undoPolicy is not set in agent.ts". If `undo()` never ran, `undoPolicy` denies every call with "mount undo with `undo()` from undo-eve/agent".
 
 Rows are keyed by `session.id` plus `callId`, because eve's `callId` is unique only within a session. eve runs the policy again after a person approves a call; the row is updated, not duplicated, and the reviewer doesn't run again. `approve: "human"` calls never go to the reviewer.
 
@@ -109,7 +112,7 @@ Approval and strategy are separate. Approval decides whether the call runs at al
 | The ticket and other context for the reviewer | The same hook records each user message from `delivery.consumed` against its session |
 | Reviewer | `review` function called from `undoPolicy`; default is `decide` from `eve/ai` (AI Gateway, `typesafe-ai/jev`) with the call, the session's messages and its recent rows |
 | Adapters | Extension tools (`undo__stripe_refund`, `undo__stripe_capture`, `undo__resend_send`) |
-| Hold an action | The row's own state machine in the ledger: `held` until `undoUntil`, then a compare-and-set to `running`. An in-process timer runs it on time. A sweep runs anything the timer missed, such as after a restart: at startup, on every ledger API read, and from an extension schedule (`undo__sweep`, every minute) once deployed (`eve dev` doesn't fire schedules on their cadence). The compare-and-set means a held action runs once, whoever gets there first. Resend holds natively: undo sends with `scheduled_at` and cancels through Resend. |
+| Hold an action | The row's own state machine in the ledger: `held` until `undoUntil`, then a compare-and-set to `running`. An in-process timer runs it on time. A sweep runs anything the timer missed, such as after a restart. It also re-runs `running` rows older than a 60-second lease with the same idempotency key, so a crash between the compare-and-set and the result can't strand a row. The executor and the first sweep start on undo's first use at runtime (a call, a hook event, a page or API request, or the schedule), never at module load, because eve also loads modules during `eve build`. Once deployed, an extension schedule (`undo__sweep`, every minute) sweeps too; `eve dev` doesn't fire schedules on their cadence, and locally the page's polling does it. The compare-and-set means a held action runs once, whoever gets there first. Resend holds natively: undo sends with `scheduled_at`; at `undoUntil` the sweep reads the email's status, and a cancel Resend refuses returns `irreversible`. |
 | The agent fixing its own mistake | Extension tools `undo__undo` and `undo__history`, plus a short extension `instructions.md` |
 | One click, one sentence | Extension channel routes: the ledger page at `GET /undo`, a JSON API under `/undo/api`, and a sentence box on the page |
 | Stripe and Resend in production | eve MCP connections with `connect("<connector>")` from `@vercel/connect/eve`; adapters get tokens with `getToken` from `@vercel/connect` |
@@ -136,9 +139,10 @@ What the acting agent sees. Each adapter's description ends with its undo terms,
 | `undo__stripe_refund` | `{ payment_intent, amount?, reason? }` | `{ status: "scheduled", rowId, undoUntil }` |
 | `undo__stripe_capture` | `{ payment_intent, amount? }` | `{ status: "done", rowId, undo: "refund" }` |
 | `undo__resend_send` | `{ to, subject, text }` | `{ status: "scheduled", rowId, undoUntil }` |
-| Any write the policy denies | | eve's denied result with the reason: `use undo__stripe_refund; it can be undone for 2m`, `blocked by reviewer: <reason>`, `review unavailable, try once more`, or, after two unavailable reviews of the same call in a session, `review unavailable; don't retry, report it` |
-| `undo__history` | `{ query?, limit? }` (default: this session, 20 rows) | One line per row: `<rowId> <tool> <summary> <state> [undo until <time>]`; `failed` rows come first |
-| `undo__undo` | `{ rowId }` or `{ request }` | `{ status: "cancelled" \| "undone", rowId }`, `{ status: "conflict", current }`, `{ status: "irreversible", rowId, followUp }`, `{ status: "ambiguous", candidates }`, `{ status: "not_found" }`, `{ status: "not_allowed", reason }` |
+| Any write the policy denies | | eve's denied result with the reason: `use undo__stripe_refund; it can be undone for 2m`, `blocked by reviewer: <reason>`, `review unavailable, try once more`, or, after two unavailable reviews of the same tool and input in a session, `review unavailable; don't retry, report it` |
+| Your `reversible()` tools | your input | `do`'s result plus `rowId`; the description ends "It can be undone later with undo__undo." |
+| `undo__history` | `{ query?, limit? }` (default: this session's last 20 rows that aren't reads or undo's own tools) | One line per row: `<rowId> <tool> <summary> <state> [undo until <time>]`; `failed` rows come first |
+| `undo__undo` | `{ rowId }` or `{ request }` | `{ status: "cancelled" \| "undone", rowId }`, `{ status: "conflict", current }`, `{ status: "irreversible", rowId, followUp }`, `{ status: "ambiguous", candidates }`, `{ status: "not_found" }`, `{ status: "not_allowed", reason }` (also for a row that is `running`, `failed` or never ran) |
 
 Rules:
 
@@ -191,14 +195,14 @@ export default reversible({
 });
 ```
 
-`reversible()` returns an ordinary eve `defineTool` with strategy `reverse`. `name` is required: at load, undo registers the tool in a process-wide registry under that name, so `undoPolicy` knows its strategy and approve before the call, and the Undo button, `undo__undo` and the sentence box find its `undo` later. A duplicate name fails at load, and a call whose final name differs from `name` fails with an error that says so. `ctx` in `do` and `undo` is undo's own: `idempotencyKey` (derived from the row, so a retried `do` or a second `undo` repeats it) and `conflict(current)`. `undo` is not a durable Workflow step (see above); the row's state machine plus the idempotency key make a retry safe.
+`reversible()` returns an ordinary eve `defineTool` with strategy `reverse`. `name` is required: at load, undo registers the tool in a process-wide registry under that name, so `undoPolicy` knows its strategy and approve before the call, and the Undo button, `undo__undo` and the sentence box find its `undo` later. A duplicate name logs an error, and a call whose final name differs from `name` fails with an error that says so. `do` gets eve's tool `ctx` (`session`, `abortSignal`, ...) plus `idempotencyKey`; `undo` gets undo's own `ctx`: `idempotencyKey` and `conflict(current)`. Each key is derived from the row, so a retried `do` or a second `undo` repeats it. `undo` is not a durable Workflow step (see above); the row's state machine plus the idempotency key make a retry safe.
 
 ### 4. The reviewer
 
 - Runs inside `undoPolicy` for every call whose approve is `agent`, before the call starts and before any hold.
 - Sees the call, the session's user messages (such as the ticket) and the session's recent rows. Read-only.
 - Approve: the call runs (and holds, for a cancel adapter). Block: the call never runs, and the acting agent gets "blocked by reviewer: <reason>" and replans. Verdict and reason are stored on the row.
-- If the review errors or times out, the call is denied with "review unavailable, try once more"; after two such denials for the same call in a session, "review unavailable; don't retry, report it". It never falls back to asking a person.
+- If the review errors or times out, the call is denied with "review unavailable, try once more"; after two such denials for the same tool and input in a session, "review unavailable; don't retry, report it". It never falls back to asking a person.
 - It can use a different model from the acting agent.
 
 ### 5. Undo in one sentence
@@ -292,8 +296,8 @@ From the eve 1.1.0 docs and a local spike with `eve dev` and `mockModel`:
 Each item is an automated check against the fakes; the same checks run against Vercel once Berny approves connectors and a deploy.
 
 1. `pnpm demo` runs the demo with no person (step 3 goes through the page's API) and exits 0.
-2. A fresh eve agent with the `undo-eve` workspace package plus the two files above passes `eve build` and records a row.
-3. With default settings, no call waits for a person: a session with every default ends with no `awaiting_person` row.
+2. A fresh eve agent with the `undo-eve` workspace package plus the two files above passes `eve build`, records a row, and logs the "reviewing as a write" line for its plain tool.
+3. With default settings, no call waits for a person: a session with every default ends with no `awaiting_person` row, and a read gets a row with no reviewer call.
 4. A direct fake Stripe MCP write with no adapter is recorded as `irreversible`; one with an adapter is denied with the adapter's name, and the agent then uses the adapter.
 5. The reviewer blocks the wrong-customer refund in an eve eval and in the demo; the fake Stripe request log shows no refund to Bob.
 6. Undo during a hold (`POST /undo/api/rows/:rowId/undo`): no refund in the fake Stripe log; the email is cancelled in the fake Resend and never sends.
@@ -301,4 +305,5 @@ Each item is an automated check against the fakes; the same checks run against V
 8. "cancel the email to Bob" through `/undo/api/plan` undoes exactly that row; "undo it" gets a question with candidates.
 9. A change made by someone else after the agent's `reversible()` write shows as `conflict` on undo, and the newer change is kept.
 10. In an eval, the agent calls `undo__undo({ rowId })` on its own email to Bob, and the fake Resend shows it cancelled.
-11. Stopping the server during a hold and starting it again runs the held action exactly once.
+11. Stopping the server during a hold and starting it again runs the held action exactly once, and a `reversible()` row written before the restart is undone through the Undo endpoint before any new turn.
+12. A call with `approve: "human"` parks the turn with one `awaiting_person` row and no reviewer call; after a person approves through the eve client, it runs once and the same row ends `irreversible`.

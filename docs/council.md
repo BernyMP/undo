@@ -10,6 +10,8 @@ Members: Claude Opus 5.5 (high effort) and Claude Fable 5.2 (high effort), both 
 | 1 | Claude Fable 5.2 | 8 | 6 | 6 | 6 |
 | 2 | Claude Opus 5.5 | 8 | 8 | 8 | 7 |
 | 2 | Claude Fable 5.2 | 9 | 8 | 8 | 8 |
+| 3 | Claude Opus 5.5 | 9 | 9 | 9 | 8 |
+| 3 | Claude Fable 5.2 | 9 | 8 | 9 | 9 |
 
 ## Round 1 (2026-11-19)
 
@@ -53,3 +55,23 @@ What changed for round 3:
 - `reversible({ name })` is required and keyed by final tool name; the config `approve` map wins; `ctx` is undo's own. A spike confirmed the registry is filled after a restart before any turn.
 - Done grew to 11 items: the agent undoing its own email, the Undo endpoint, and a restart during a hold. `pnpm demo` plays step 3 through the page's API; `pnpm demo --keep` leaves it up for clicking.
 - Defined `current`, `followUp` and inverse rows; added the retry cap, adapter pre-checks, failed-first ordering, a dev-only page, a missing-policy warning, and a sweep at startup and on every API read.
+
+## Round 3 (2026-11-19)
+
+Reviewed: docs/mvp.md and README.md at commit 4e01a19. Both members said round 2's fixes hold, apart from the end states below.
+
+Main objections:
+
+- **Your own read tools look like writes** (Opus, DX): with `defaultApprove: "agent"`, a plain `lookup_order` gets a reviewer call and an `irreversible` label, and nothing tells the developer.
+- **End states were incomplete** (Fable): reads and sandbox rows had no end state; calls eve doesn't send to the policy (`eve__search`, `eve__skill`, task controls) would trigger the "undoPolicy is not set" warning; the redirect denial had no row state.
+- **Holes in the hold state machine** (both): a crash after the compare-and-set strands a row in `running`; a sweep at module load would run held actions during `eve build`; Resend's way out of `held` was undefined.
+- **`approve: "human"` was never exercised** by a Done item (Fable).
+- Minor: the default reviewer can't produce a free-text reason with `decide`; sandbox tools can reach the network; `undo__history` filled with reads; "same call" in the retry cap never matches because `callId` changes; `reversible()` results and `do`'s context were undefined; the restart claim for the registry needed a Done check; README wording.
+
+What changed for round 4:
+
+- A first-call log line for each plain tool reviewed as a write; the README says so; Done #2 checks it.
+- Defined end states: reads and sandbox calls end `done`, only rule-6 writes end `irreversible`, redirects end `blocked`; the hook writes rows for eve's ungated calls without warning; `undoPolicy` denies with a clear message when `undo()` never ran.
+- A 60-second lease re-runs stuck `running` rows with the same idempotency key; the executor starts on first runtime use, never at module load; Resend's sweep reads the email's status at `undoUntil`.
+- Done #12 checks `approve: "human"` end to end; Done #3 and #11 grew a read-row check and a registry-after-restart check.
+- The default reviewer and matcher are concrete `decide` choice questions; sandbox network wording; `undo__history` hides reads and undo's own calls; "same tool and input"; `reversible()` results and contexts; a `subagents` option.

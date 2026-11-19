@@ -22,8 +22,8 @@ export default defineAgent({ model: "anthropic/claude-sonnet-5-5", approval: und
 
 - **Records every call** your agent makes, including connection tools. A subagent's own calls are recorded in full when it mounts undo too.
 - **Cancel or reverse**: risky actions wait a short hold you can cancel; done actions are reversed with a compensating action; anything that can't be reversed is labelled before it runs.
-- **Agents check agents**: a reviewer approves or blocks writes before they run. A person approves only where you set `approve: "human"`.
-- **One click or one sentence**: an Undo button on every row of the ledger page, or "cancel the email to Bob". Your agent can undo its own mistakes with `undo__undo`.
+- **Agents check agents**: a reviewer approves or blocks writes to outside services before they run. A person approves only where you set `approve: "human"`. Your own tools count as writes until you list read-only ones in `reads`; undo logs each one the first time it reviews it.
+- **One click or one sentence**: an Undo button on every row that can still be undone, or "cancel the email to Bob". Your agent can undo its own mistakes with `undo__undo`.
 - **Your own tools**: wrap a tool in `reversible({ do, undo })` and it gets the same Undo button.
 - **Built on Vercel**: eve, Vercel Connect (Stripe, Resend and the rest of its catalog) and AI Gateway.
 
