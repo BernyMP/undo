@@ -8,6 +8,8 @@ Members: Claude Opus 5.5 (high effort) and Claude Fable 5.2 (high effort), both 
 |---|---|---|---|---|---|
 | 1 | Claude Opus 5.5 | 8 | 6 | 6 | 6 |
 | 1 | Claude Fable 5.2 | 8 | 6 | 6 | 6 |
+| 2 | Claude Opus 5.5 | 8 | 8 | 8 | 7 |
+| 2 | Claude Fable 5.2 | 9 | 8 | 8 | 8 |
 
 ## Round 1 (2026-11-19)
 
@@ -31,3 +33,23 @@ What changed for round 2:
 - Added the agent contract table, row states, the instruction fragment and one config table; `undoPolicy(existing)` composes.
 - Cut Slack, the digest, trigger forwarding, the undoer subagent, "Undo run" / "Undo to here", Next.js and the authorization adapter from the MVP. The ledger page is one extension route.
 - Fake Stripe serves MCP for the direct-write check. Every Done item is worded against the fakes.
+
+## Round 2 (2026-11-19)
+
+Reviewed: docs/mvp.md and README.md at commit 28f1317, plus the spike code. Both members said round 1's fixes hold.
+
+Main objections:
+
+- **No read/write precedence.** With `defaultApprove: "agent"`, eve's default `bash`, `write_file` and `edit_file` calls would each get a reviewer call and an `irreversible` label; the read-name heuristic could let a write skip review (both).
+- **Row identity.** eve's `callId` is unique only within a session, and `mockModel` repeats ids across runs, so rows and idempotency keys could collide across demo runs (Fable).
+- **`reversible()` keyed by description** can't be seen by the policy (which gets only the tool name), breaks when a description changes, and might not load after a restart (both).
+- **Gaps in the Done list**: no check for the agent undoing its own mistake, the one-click button, or a hold surviving a restart; the demo's step 3 needed a person inside a 20-second hold (both).
+- Minor: the policy recheck after a person's approval; a retry cap on "review unavailable"; `followUp`, `current` and undo-of-an-inverse undefined; late failures reach nobody; the unauthenticated page; a missing `undoPolicy` failing silently; `eve dev` never fires schedules.
+
+What changed for round 3:
+
+- A six-rule precedence list in "How a call flows", a `reads` option, and no name guessing.
+- Rows keyed by session plus `callId`; the demo starts from a fresh ledger file.
+- `reversible({ name })` is required and keyed by final tool name; the config `approve` map wins; `ctx` is undo's own. A spike confirmed the registry is filled after a restart before any turn.
+- Done grew to 11 items: the agent undoing its own email, the Undo endpoint, and a restart during a hold. `pnpm demo` plays step 3 through the page's API; `pnpm demo --keep` leaves it up for clicking.
+- Defined `current`, `followUp` and inverse rows; added the retry cap, adapter pre-checks, failed-first ordering, a dev-only page, a missing-policy warning, and a sweep at startup and on every API read.
