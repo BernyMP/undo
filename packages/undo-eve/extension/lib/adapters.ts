@@ -138,7 +138,7 @@ setHeldExecutor("stripe.refund", async (row) => {
   const mine = row.ref?.attempted ? (await stripe.refunds(row.action.params.payment_intent)).find((r: any) => r.metadata?.undo_key === key) : undefined;
   if (!mine) store.update(row.rowId, { ref: { ...(row.ref ?? {}), attempted: true } });
   const refund = mine ?? (await stripe.createRefund(row.action.params, key));
-  store.transition(row.rowId, "running", "irreversible", { output: { status: "done", refund }, ref: { refund: refund.id } });
+  store.transition(row.rowId, "running", "irreversible", { output: { status: "done", refund }, ref: { ...(row.ref ?? {}), refund: refund.id }, error: null });
 });
 
 // ---- Resend send: held natively with scheduled_at, cancelled through Resend ----
@@ -169,8 +169,8 @@ setHeldExecutor("resend.scheduled", async (row) => {
     email = await resend.get(row.action.params.id);
   } catch (err) {
     const status = (err as any)?.status;
-    if (typeof status === "number" && status >= 400 && status < 500 && status !== 429) {
-      // A definite refusal (bad token, unknown id): undo can't see this email any more.
+    if (typeof status === "number" && status < 500 && status !== 429) {
+      // A definite refusal (bad or missing token, unknown id): undo can't see this email any more.
       store.transition(row.rowId, "running", "irreversible", {
         error: `can't read the email's status from Resend: ${err instanceof Error ? err.message : String(err)}; check it in Resend`,
       });
@@ -181,13 +181,13 @@ setHeldExecutor("resend.scheduled", async (row) => {
     if (again) armTimer(again);
     return;
   }
-  if (email.last_event === "canceled") store.transition(row.rowId, "running", "cancelled");
+  if (email.last_event === "canceled") store.transition(row.rowId, "running", "cancelled", { error: null });
   else if (email.last_event === "scheduled") {
     // Resend hasn't sent it yet; look again shortly.
     const again = store.transition(row.rowId, "running", "held", { undoUntil: Date.now() + 1000 });
     if (again) armTimer(again);
   }
-  else store.transition(row.rowId, "running", "irreversible", { output: { status: "done", email: email.id, last_event: email.last_event } });
+  else store.transition(row.rowId, "running", "irreversible", { output: { status: "done", email: email.id, last_event: email.last_event }, error: null });
 });
 
 // ---- Stripe capture: runs now; the inverse is a refund ----

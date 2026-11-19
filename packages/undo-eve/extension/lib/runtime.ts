@@ -146,9 +146,10 @@ async function execute(store: LedgerStore, running: Row): Promise<void> {
     // lease makes a later sweep retry with the same idempotency key.
     const message = err instanceof Error ? err.message : String(err);
     const status = (err as any)?.status;
-    const transient =
-      (typeof status === "number" && (status >= 500 || status === 409 || status === 429)) ||
-      (err instanceof TypeError && /fetch failed|network|ECONN|ETIMEDOUT/i.test(`${err.message} ${(err as any).cause ?? ""}`));
+    // Only a definite refusal is final (4xx other than 409/429, or status 0 for missing config).
+    // Anything else, including a response cut off mid-body, may have gone through: retry.
+    const refused = typeof status === "number" && status < 500 && status !== 409 && status !== 429;
+    const transient = !refused;
     const attempts = Number(running.ref?.attempts ?? 0) + 1;
     if (transient && attempts < MAX_ATTEMPTS) {
       console.warn(`[undo] ${rowId}: ${message}; will retry with the same idempotency key (${attempts}/${MAX_ATTEMPTS})`);
