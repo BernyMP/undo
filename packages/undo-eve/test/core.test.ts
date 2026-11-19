@@ -14,6 +14,7 @@ import {
   resendSend,
   rowForCall,
   makeCtx,
+  idemKey,
   setConfig,
   stripeCapture,
   stripeRefund,
@@ -203,10 +204,10 @@ describe("reverse strategy", () => {
     // Simulate a crash after the refund reached Stripe but before the row said so.
     await fetch(`${fakes.url}/stripe/v1/refunds`, {
       method: "POST",
-      headers: { authorization: "Bearer x", "content-type": "application/x-www-form-urlencoded", "idempotency-key": `undo-${rowId}-undo` },
+      headers: { authorization: "Bearer x", "content-type": "application/x-www-form-urlencoded", "idempotency-key": idemKey(store, rowId, "undo") },
       body: "payment_intent=pi_carol&amount=5000",
     });
-    store.update(rowId, { ref: { undoStarted: true } });
+    store.update(rowId, { ref: { ...store.get(rowId)!.ref, undoStarted: true } });
     expect((await undoRow(rowId)).status).toBe("undone");
     expect(fakes.fakes.listRefunds("pi_carol")).toHaveLength(1);
   });
@@ -238,7 +239,7 @@ describe("reverse strategy", () => {
       },
       undo: async (input: any, result: any, rctx) => {
         const list = await (await fetch(`${base}/${input.customer}/balance_transactions`, { headers })).json();
-        if (list.data[0]?.id !== result.changeId) return rctx.conflict({ latest: list.data[0] });
+        if (!rctx.retry && list.data[0]?.id !== result.changeId) return rctx.conflict({ latest: list.data[0] });
         await fetch(`${base}/${input.customer}/balance_transactions`, {
           method: "POST",
           headers: { ...headers, "idempotency-key": rctx.idempotencyKey },
@@ -250,7 +251,7 @@ describe("reverse strategy", () => {
       const { ctx } = await call("issue_credit", { customer: "cus_alice", cents: 500 });
       const { store, row } = await rowForCall(ctx, { customer: "cus_alice", cents: 500 }, { kind: "reversible", strategy: "reverse", summary: "credit" });
       const { getReversible } = await import("../extension/lib/registry.ts");
-      const out = await getReversible("issue_credit")!.do({ customer: "cus_alice", cents: 500 }, makeCtx(row.rowId, "do"));
+      const out = await getReversible("issue_credit")!.do({ customer: "cus_alice", cents: 500 }, makeCtx(row.rowId, idemKey(store, row.rowId, "do")));
       store.update(row.rowId, { output: out });
       store.transition(row.rowId, "requested", "done");
       return row.rowId;
@@ -316,7 +317,7 @@ describe("lease", () => {
       const row = store.transition(rowId, "held", "running", { ref: { claim: "run" } })!;
       await fetch(`${fakes.url}/stripe/v1/refunds`, {
         method: "POST",
-        headers: { authorization: "Bearer x", "content-type": "application/x-www-form-urlencoded", "idempotency-key": `undo-${rowId}-do` },
+        headers: { authorization: "Bearer x", "content-type": "application/x-www-form-urlencoded", "idempotency-key": idemKey(store, rowId, "do") },
         body: new URLSearchParams({ payment_intent: "pi_alice", amount: String(row.action.params.amount) }).toString(),
       });
       await sleep(100);
@@ -340,5 +341,24 @@ describe("not mounted", () => {
     } finally {
       (globalThis as any)[key] = saved;
     }
+  });
+});
+
+describe("review fixes", () => {
+  it("idempotency keys differ between two ledger files", async () => {
+    const a = await getStore();
+    setConfig(config());
+    const b = await getStore();
+    expect(idemKey(a, "r1", "do")).not.toBe(idemKey(b, "r1", "do"));
+    expect(idemKey(a, "r1", "do")).toMatch(/^undo-[a-z0-9]+-r1-do$/);
+  });
+
+  it("undoing a capture refunds the captured amount even if the row's output changed", async () => {
+    (await getStore()).addMessage("s1", "Carol (pi_carol) asked us to capture her boots.");
+    const { ctx } = await call("undo__stripe_capture", { payment_intent: "pi_carol" });
+    const { rowId } = await stripeCapture(ctx, { payment_intent: "pi_carol" });
+    (await getStore()).update(rowId, { output: { status: "done", rowId, undo: "refund" } });
+    expect((await undoRow(rowId)).status).toBe("undone");
+    expect(fakes.fakes.listRefunds("pi_carol").map((r) => r.amount)).toEqual([5000]);
   });
 });

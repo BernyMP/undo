@@ -55,7 +55,7 @@ export type UndoConfig = {
   match?: MatchFn;
   /** Where the ledger lives. Default: SQLite at .undo/ledger.db. */
   store?: { path?: string } | LedgerStore;
-  /** Serve the /undo page and API. Default: on unless NODE_ENV is "production". */
+  /** Serve the /undo page and API. Default: on only under `eve dev` (they are unauthenticated). */
   page?: boolean;
 };
 
@@ -91,7 +91,7 @@ export function setConfig(config: UndoConfig): ResolvedConfig {
     reads: config.reads ?? [],
     subagents: config.subagents ?? [],
     adapters: config.adapters ?? {},
-    page: config.page ?? process.env.NODE_ENV !== "production",
+    page: config.page ?? process.env.EVE_DEV === "1",
   };
   (globalThis as any)[KEY] = resolved;
   return resolved;

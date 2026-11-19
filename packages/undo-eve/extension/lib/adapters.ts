@@ -6,7 +6,7 @@ import type { Approve } from "./config.ts";
 import { requireConfig } from "./config.ts";
 import { armTimer, getStore, setHeldExecutor } from "./runtime.ts";
 import { resend, ServiceError, stripe } from "./services.ts";
-import type { LedgerStore, Row, Strategy } from "./store.ts";
+import { idemKey, type LedgerStore, type Row, type Strategy } from "./store.ts";
 
 export type AdapterDef = {
   /** Final tool name, e.g. "undo__stripe_refund". */
@@ -94,8 +94,8 @@ export async function rowForCall(
   return { store, row };
 }
 
-function hold(store: LedgerStore, row: Row, action: unknown, ref?: unknown) {
-  const undoUntil = Date.now() + requireConfig().holdMs;
+function hold(store: LedgerStore, row: Row, action: unknown, ref?: unknown, until?: number) {
+  const undoUntil = until ?? Date.now() + requireConfig().holdMs;
   const held = store.transition(row.rowId, "requested", "held", { undoUntil, action, ref });
   if (!held) throw new Error(`undo: row ${row.rowId} is ${store.get(row.rowId)?.state}, not requested`);
   armTimer(held);
@@ -112,8 +112,8 @@ export async function stripeRefund(ctx: any, input: { payment_intent: string; am
   if (pi.status !== "succeeded") throw new Error(`${pi.id} is ${pi.status}; only a captured payment can be refunded.`);
   const refunded = (await stripe.refunds(pi.id)).reduce((s: number, r: any) => s + r.amount, 0);
   const pendingHolds = store
-    .pendingHolds()
-    .filter((r) => r.action?.op === "stripe.refund" && r.action.params.payment_intent === pi.id)
+    .list({ limit: 1000 })
+    .filter((r) => (r.state === "held" || r.state === "running") && r.action?.op === "stripe.refund" && r.action.params.payment_intent === pi.id)
     .reduce((s, r) => s + (r.action.params.amount ?? pi.amount_received), 0);
   const left = pi.amount_received - refunded - pendingHolds;
   const amount = input.amount ?? left;
@@ -124,7 +124,7 @@ export async function stripeRefund(ctx: any, input: { payment_intent: string; am
 
 setHeldExecutor("stripe.refund", async (row) => {
   const store = await getStore();
-  const refund = await stripe.createRefund(row.action.params, `undo-${row.rowId}-do`);
+  const refund = await stripe.createRefund(row.action.params, idemKey(store, row.rowId, "do"));
   store.transition(row.rowId, "running", "irreversible", { output: { status: "done", refund }, ref: { refund: refund.id } });
 });
 
@@ -134,19 +134,24 @@ export async function resendSend(ctx: any, input: { to: string; subject: string;
   const def = adapterByTool("undo__resend_send")!;
   const { store, row } = await rowForCall(ctx, input, { kind: "adapter", strategy: def.strategy, summary: def.summary(input) });
   const cfg = requireConfig();
-  const scheduledAt = new Date(Date.now() + cfg.holdMs).toISOString();
+  // One timestamp for both: Resend sends at scheduled_at, and the undo window ends then too.
+  const until = Date.now() + cfg.holdMs;
   const email = await resend.send(
-    { from: cfg.services?.resend?.from ?? "shop@example.com", to: input.to, subject: input.subject, text: input.text, scheduled_at: scheduledAt },
-    `undo-${row.rowId}-do`,
+    { from: cfg.services?.resend?.from ?? "shop@example.com", to: input.to, subject: input.subject, text: input.text, scheduled_at: new Date(until).toISOString() },
+    idemKey(store, row.rowId, "do"),
   );
-  return hold(store, row, { op: "resend.scheduled", params: { id: email.id } }, { email: email.id });
+  return hold(store, row, { op: "resend.scheduled", params: { id: email.id } }, { email: email.id }, until);
 }
 
 setHeldExecutor("resend.scheduled", async (row) => {
   const store = await getStore();
   const email = await resend.get(row.action.params.id);
   if (email.last_event === "canceled") store.transition(row.rowId, "running", "cancelled");
-  else if (email.last_event === "scheduled") store.transition(row.rowId, "running", "held", { undoUntil: Date.now() + 1000 });
+  else if (email.last_event === "scheduled") {
+    // Resend hasn't sent it yet; look again shortly.
+    const again = store.transition(row.rowId, "running", "held", { undoUntil: Date.now() + 1000 });
+    if (again) armTimer(again);
+  }
   else store.transition(row.rowId, "running", "irreversible", { output: { status: "done", email: email.id, last_event: email.last_event } });
 });
 
@@ -155,8 +160,11 @@ setHeldExecutor("resend.scheduled", async (row) => {
 export async function stripeCapture(ctx: any, input: { payment_intent: string; amount?: number }) {
   const def = adapterByTool("undo__stripe_capture")!;
   const { store, row } = await rowForCall(ctx, input, { kind: "adapter", strategy: def.strategy, summary: def.summary(input) });
-  const pi = await stripe.capture(input.payment_intent, { amount_to_capture: input.amount }, `undo-${row.rowId}-do`);
-  store.transition(row.rowId, "requested", "done", { output: { status: "done", payment_intent: pi.id, amount: pi.amount_received } });
+  const pi = await stripe.capture(input.payment_intent, { amount_to_capture: input.amount }, idemKey(store, row.rowId, "do"));
+  store.transition(row.rowId, "requested", "done", {
+    output: { status: "done", payment_intent: pi.id, amount: pi.amount_received },
+    ref: { payment_intent: pi.id, captured: pi.amount_received },
+  });
   return { status: "done" as const, rowId: row.rowId, undo: "refund" as const };
 }
 
@@ -190,16 +198,17 @@ export async function cancelHeld(row: Row): Promise<"cancelled" | "too_late"> {
  * earlier undo of this row started but didn't finish; then a refund already on
  * the payment may be ours, and the same idempotency key makes Stripe replay it.
  */
-export async function reverseAdapter(row: Row, retry: boolean): Promise<{ ok: true; output: unknown } | { conflict: unknown }> {
+export async function reverseAdapter(store: LedgerStore, row: Row, retry: boolean): Promise<{ ok: true; output: unknown } | { conflict: unknown }> {
   if (row.tool === "undo__stripe_capture") {
-    const piId = (row.input as any)?.payment_intent;
-    const captured = (row.output as any)?.amount;
+    const piId = row.ref?.payment_intent ?? (row.input as any)?.payment_intent;
+    const captured = row.ref?.captured;
+    if (!captured) throw new Error(`undo: ${row.rowId} has no captured amount on record`);
     const refunded = (await stripe.refunds(piId)).reduce((s: number, r: any) => s + r.amount, 0);
     if (refunded > 0 && !retry) {
       // Someone refunded this payment after the agent captured it: never refund twice.
       return { conflict: { payment_intent: piId, amount_refunded: refunded, captured } };
     }
-    const refund = await stripe.createRefund({ payment_intent: piId, amount: captured }, `undo-${row.rowId}-undo`);
+    const refund = await stripe.createRefund({ payment_intent: piId, amount: captured }, idemKey(store, row.rowId, "undo"));
     return { ok: true, output: { refund } };
   }
   throw new Error(`undo: ${row.tool} has no inverse`);

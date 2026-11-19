@@ -52,6 +52,10 @@ export type NewRow = Pick<Row, "sessionId" | "callId" | "tool" | "input" | "summ
 export type Plan = { planId: string; sentence: string; rowIds: string[]; createdAt: number; confirmedAt: number | null };
 
 export interface LedgerStore {
+  /** Random per ledger file; prefixes every idempotency key so two ledgers never collide. */
+  readonly ledgerId: string;
+  /** Refresh a running row's lease. */
+  touch(rowId: string): void;
   upsertRow(row: NewRow): Row;
   getByCall(sessionId: string, callId: string): Row | undefined;
   get(rowId: string): Row | undefined;
@@ -117,6 +121,7 @@ export async function openSqliteStore(path: string): Promise<LedgerStore> {
     CREATE INDEX IF NOT EXISTS rows_state ON rows (state, undo_until);
     CREATE TABLE IF NOT EXISTS messages (session_id TEXT NOT NULL, text TEXT NOT NULL, at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS review_failures (session_id TEXT NOT NULL, key TEXT NOT NULL, count INTEGER NOT NULL, PRIMARY KEY (session_id, key));
+    CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS plans (id TEXT PRIMARY KEY, sentence TEXT NOT NULL, row_ids TEXT NOT NULL, created_at INTEGER NOT NULL, confirmed_at INTEGER);
   `);
 
@@ -132,7 +137,16 @@ export async function openSqliteStore(path: string): Promise<LedgerStore> {
   const enc = (k: string, v: unknown) => ((JSON_COLS as readonly string[]).includes(k) ? (v === undefined ? null : JSON.stringify(v)) : (v ?? null));
   const idOf = (rowId: string) => Number(String(rowId).replace(/^r/, ""));
 
+  db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('ledger_id', ?)").run(
+    `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
+  );
+  const ledgerId = String((db.prepare("SELECT value FROM meta WHERE key = 'ledger_id'").get() as any).value);
+
   const store: LedgerStore = {
+    ledgerId,
+    touch(rowId) {
+      db.prepare("UPDATE rows SET updated_at = ? WHERE id = ? AND state = 'running'").run(Date.now(), idOf(rowId));
+    },
     upsertRow(row) {
       const now = Date.now();
       const existing = store.getByCall(row.sessionId, row.callId);
@@ -221,4 +235,9 @@ export async function openSqliteStore(path: string): Promise<LedgerStore> {
     },
   };
   return store;
+}
+
+/** The idempotency key for one row's `do` or `undo`: unique across ledgers, the same on every retry. */
+export function idemKey(store: LedgerStore, rowId: string, phase: "do" | "undo"): string {
+  return `undo-${store.ledgerId}-${rowId}-${phase}`;
 }

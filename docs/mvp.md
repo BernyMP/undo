@@ -143,7 +143,7 @@ What the acting agent sees. Each adapter's description ends with its undo terms,
 | Any write the policy denies | | eve's denied result with the reason: `use undo__stripe_refund; it can be undone for 2m`, `blocked by reviewer: <reason>`, `review unavailable, try once more`, or, after two unavailable reviews of the same tool and input in a session, `review unavailable; don't retry, report it` |
 | Your `reversible()` tools | your input | `do`'s result plus `rowId`; the description ends "It can be undone later with undo__undo." |
 | `undo__history` | `{ query?, limit? }` (default: this session's last 20 rows that aren't reads or `undo__history` / `undo__undo` calls) | One line per row: `<rowId> <tool> <summary> <state> [undo until <time>]`; `failed` rows come first |
-| `undo__undo` | `{ rowId }` or `{ request }` | `{ status: "cancelled" \| "undone", rowId }`, `{ status: "conflict", current }`, `{ status: "irreversible", rowId, followUp }`, `{ status: "ambiguous", candidates }`, `{ status: "not_found" }`, `{ status: "not_allowed", reason }` (also for a row that is `running`, `failed` or never ran) |
+| `undo__undo` | `{ rowId }` or `{ request }` | `{ status: "cancelled" \| "undone", rowId }`, `{ status: "conflict", current }`, `{ status: "irreversible", rowId, followUp }`, `{ status: "ambiguous", candidates }`, `{ status: "not_found" }`, `{ status: "not_allowed", reason }` (also for a row that is `running`, `failed` or never ran), `{ status: "failed", rowId, error }` when the inverse itself errored (the row stays undoable) |
 
 Rules:
 
@@ -190,13 +190,14 @@ export default reversible({
   do: async (input, ctx) => credits.add(input, { idempotencyKey: ctx.idempotencyKey }),
   undo: async (input, result, ctx) => {
     const now = await credits.get(input.customer);
-    if (now.lastChange !== result.changeId) return ctx.conflict(now);
-    await credits.remove(result.changeId, { idempotencyKey: ctx.idempotencyKey });
+    // On a retry the newest change may be our own reversal; the same key replays it.
+    if (!ctx.retry && now.lastChange !== result.changeId) return ctx.conflict(now);
+    await credits.remove(result.changeId, { idempotencyKey: ctx.idempotencyKey }); // throws on failure
   },
 });
 ```
 
-`reversible()` returns an ordinary eve `defineTool` with strategy `reverse`. `name` is required: at load, undo registers the tool in a process-wide registry under that name, so `undoPolicy` knows its strategy and approve before the call, and the Undo button, `undo__undo` and the sentence box find its `undo` later. A duplicate name logs an error, and a call whose final name differs from `name` fails with an error that says so. `do` gets eve's tool `ctx` (`session`, `abortSignal`, ...) plus `idempotencyKey`; `undo` gets undo's own `ctx`: `idempotencyKey` and `conflict(current)`. Each key is derived from the row, so a retried `do` or a second `undo` repeats it. `undo` is not a durable Workflow step (see above); the row's state machine plus the idempotency key make a retry safe.
+`reversible()` returns an ordinary eve `defineTool` with strategy `reverse`. `name` is required: at load, undo registers the tool in a process-wide registry under that name, so `undoPolicy` knows its strategy and approve before the call, and the Undo button, `undo__undo` and the sentence box find its `undo` later. A duplicate name logs an error, and a call whose final name differs from `name` fails with an error that says so. `do` gets eve's tool `ctx` (`session`, `abortSignal`, ...) plus `idempotencyKey`; `undo` gets undo's own `ctx`: `idempotencyKey`, `retry` (an earlier attempt started but didn't finish) and `conflict(current)`. Each key is `undo-<ledger id>-<rowId>-do|undo`: the same on every retry, and different across ledger files, so two ledgers sharing one Stripe account never collide. `undo` must throw when the service refuses, or the row would say `undone`. `undo` is not a durable Workflow step (see above); the row's state machine plus the idempotency key make a retry safe.
 
 ### 4. The reviewer
 
@@ -224,7 +225,7 @@ One page served by the extension at `/undo` on the agent's own server. It polls 
 | `POST /undo/api/plan` `{ sentence }` | Returns `{ planId, rows }` or `{ question, candidates }` |
 | `POST /undo/api/plan/:planId/confirm` | Runs the plan |
 
-The page and API are unauthenticated, so they answer only under `eve dev` and return 404 in a production build until an `auth` option exists. Each read of the API also sweeps due holds. If a call reaches an undo tool or hook with no row, undo logs "undoPolicy is not set in agent.ts".
+The page and API are unauthenticated, so they answer only under `eve dev` (which sets `EVE_DEV=1`) and return 404 otherwise, until an `auth` option exists. POSTs must be JSON from the same origin, so another web page can't trigger an undo. Each read of the API also sweeps due holds. If a call reaches an undo tool or hook with no row, undo logs "undoPolicy is not set in agent.ts".
 
 ### 7. Demo: a shop's support agent
 

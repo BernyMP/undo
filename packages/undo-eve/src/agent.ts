@@ -7,7 +7,9 @@ import type { z } from "zod";
 import extension from "../dist/index.mjs";
 import {
   decide,
+  getConfig,
   getStore,
+  idemKey,
   makeCtx,
   registerReversible,
   requireConfig,
@@ -36,6 +38,9 @@ export function undo(config: UndoConfig = {}) {
  */
 export function undoPolicy(inner?: (ctx: any) => unknown) {
   return async (ctx: any) => {
+    // eve runs the policy again after a person approves: that call runs, so don't re-park it.
+    const before = getConfig() ? (await getStore()).getByCall(ctx.session.id, ctx.callId) : undefined;
+    if (before?.state === "awaiting_person") return decide(ctx as PolicyCall);
     const theirs = inner ? await inner(ctx) : undefined;
     const ours = await decide(ctx as PolicyCall);
     const result = stricter(ours, theirs);
@@ -79,7 +84,7 @@ export function reversible<S extends z.ZodType, O>(opts: ReversibleOptions<S, O>
       }
       requireConfig();
       const { store, row } = await rowForCall(ctx, input, { kind: "reversible", strategy: "reverse", summary: summarize(opts.name, input) });
-      const { idempotencyKey } = makeCtx(row.rowId, "do");
+      const idempotencyKey = idemKey(store, row.rowId, "do");
       const result = await opts.do(input, Object.assign(Object.create(ctx), { idempotencyKey, rowId: row.rowId }));
       store.update(row.rowId, { output: result as any });
       store.transition(row.rowId, "requested", "done");

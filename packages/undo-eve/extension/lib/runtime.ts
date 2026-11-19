@@ -81,6 +81,17 @@ export function setRecoverer(fn: (store: LedgerStore, row: Row) => Promise<void>
   (globalThis as any)[Symbol.for("undo-eve.recover")] = fn;
 }
 
+/** Keeps a running row's lease fresh while `work` runs, so a sweep doesn't take it over. */
+export async function withLease<T>(store: LedgerStore, rowId: string, work: () => Promise<T>): Promise<T> {
+  const beat = setInterval(() => store.touch(rowId), Math.max(1000, Math.floor(leaseMs() / 3)));
+  (beat as any).unref?.();
+  try {
+    return await work();
+  } finally {
+    clearInterval(beat);
+  }
+}
+
 export async function sweep(store?: LedgerStore): Promise<number> {
   const s = store ?? (await getStore());
   const due = s.dueHolds(Date.now());
@@ -116,8 +127,10 @@ async function execute(store: LedgerStore, running: Row): Promise<void> {
     return;
   }
   try {
-    await exec(running);
+    await withLease(store, rowId, () => exec(running));
   } catch (err) {
+    // 409: the service is still processing this idempotency key; a later sweep retries.
+    if ((err as any)?.status === 409) return;
     store.transition(rowId, "running", "failed", { error: err instanceof Error ? err.message : String(err) });
   }
 }

@@ -8,6 +8,8 @@ export type ReversibleCtx = {
   /** Derived from the ledger row: the same on every retry of this `do` or `undo`. */
   idempotencyKey: string;
   rowId: string;
+  /** True when an earlier attempt of this same `undo` started but didn't finish: your own change may already be there. */
+  retry: boolean;
   /** Return this from `undo` when someone else changed the thing since. */
   conflict(current: unknown): Conflict;
 };
@@ -44,10 +46,11 @@ export function isConflict(value: unknown): value is Conflict {
   return typeof value === "object" && value !== null && (value as any).__undoConflict === true;
 }
 
-export function makeCtx(rowId: string, phase: "do" | "undo"): ReversibleCtx {
+export function makeCtx(rowId: string, idempotencyKey: string, retry = false): ReversibleCtx {
   return {
-    idempotencyKey: `undo-${rowId}-${phase}`,
+    idempotencyKey,
     rowId,
+    retry,
     conflict: (current) => ({ __undoConflict: true, current }),
   };
 }

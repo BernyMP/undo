@@ -76,14 +76,14 @@ document.addEventListener("click", async (e) => {
   const id = e.target?.dataset?.undo;
   if (id) {
     e.target.disabled = true;
-    const res = await (await fetch("/undo/api/rows/" + encodeURIComponent(id) + "/undo", { method: "POST" })).json();
+    const res = await (await fetch("/undo/api/rows/" + encodeURIComponent(id) + "/undo", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).json();
     showResult([res]);
     load();
   }
   const planId = e.target?.dataset?.confirm;
   if (planId) {
     e.target.disabled = true;
-    const res = await (await fetch("/undo/api/plan/" + encodeURIComponent(planId) + "/confirm", { method: "POST" })).json();
+    const res = await (await fetch("/undo/api/plan/" + encodeURIComponent(planId) + "/confirm", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).json();
     showResult(res.results ?? [res]);
     load();
   }

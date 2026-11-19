@@ -4,7 +4,8 @@
 
 import { FOLLOW_UP, cancelHeld, reverseAdapter } from "./adapters.ts";
 import { getReversible, isConflict, makeCtx } from "./registry.ts";
-import { getStore, setRecoverer } from "./runtime.ts";
+import { getStore, setRecoverer, withLease } from "./runtime.ts";
+import { idemKey } from "./store.ts";
 import type { LedgerStore, Row } from "./store.ts";
 
 export type UndoResult =
@@ -52,7 +53,13 @@ export async function undoRow(rowId: string, actor = "ledger"): Promise<UndoResu
     case "running":
       return { status: "not_allowed", rowId, reason: "it is running right now; check again in a moment" };
     case "failed":
-      return { status: "not_allowed", rowId, reason: `it failed and changed nothing: ${row.error ?? "unknown error"}` };
+      return {
+        status: "not_allowed",
+        rowId,
+        reason: row.error?.startsWith("interrupted")
+          ? "it was interrupted and may have partly run; check the service by hand"
+          : `it failed before it changed anything: ${row.error ?? "unknown error"}`,
+      };
     case "irreversible":
       return { status: "irreversible", rowId, followUp: FOLLOW_UP[row.tool] ?? GENERIC_FOLLOW_UP };
   }
@@ -75,40 +82,47 @@ export async function undoRow(rowId: string, actor = "ledger"): Promise<UndoResu
 
 async function finishCancel(store: LedgerStore, row: Row, actor: string): Promise<UndoResult> {
   const rowId = row.rowId;
-  {
-    const result = await cancelHeld(row);
-    if (result === "too_late") {
-      store.transition(rowId, "running", "irreversible");
-      return { status: "irreversible", rowId, followUp: FOLLOW_UP[row.tool] ?? GENERIC_FOLLOW_UP };
-    }
-    store.transition(rowId, "running", "cancelled");
-    recordInverse(store, row, actor, `cancelled ${row.summary}`);
-    return { status: "cancelled", rowId };
+  const result = await withLease(store, rowId, () => cancelHeld(row));
+  if (result === "too_late") {
+    if (!store.transition(rowId, "running", "irreversible")) return settled(store, rowId);
+    return { status: "irreversible", rowId, followUp: FOLLOW_UP[row.tool] ?? GENERIC_FOLLOW_UP };
   }
+  if (!store.transition(rowId, "running", "cancelled")) return settled(store, rowId);
+  recordInverse(store, row, actor, `cancelled ${row.summary}`);
+  return { status: "cancelled", rowId };
+}
+
+/** Another worker moved the row first: report what the row says now. */
+async function settled(store: LedgerStore, rowId: string): Promise<UndoResult> {
+  const now = store.get(rowId);
+  if (!now) return { status: "not_found", rowId };
+  if (now.state === "running") return { status: "not_allowed", rowId, reason: "it is running right now; check again in a moment" };
+  return undoRow(rowId);
 }
 
 async function finishReverse(store: LedgerStore, row: Row, actor: string, retry: boolean): Promise<UndoResult> {
   const rowId = row.rowId;
   try {
-    let outcome: { ok: true; output: unknown } | { conflict: unknown };
-    if (row.kind === "reversible") {
-      const def = getReversible(row.tool);
-      if (!def) throw new Error(`no reversible() tool named "${row.tool}" is loaded`);
-      const value = await def.undo(row.input as any, row.output as any, makeCtx(row.rowId, "undo"));
-      outcome = isConflict(value) ? { conflict: value.current } : { ok: true, output: value ?? null };
-    } else {
-      outcome = await reverseAdapter(row, retry);
-    }
+    const outcome = await withLease(store, rowId, async (): Promise<{ ok: true; output: unknown } | { conflict: unknown }> => {
+      if (row.kind === "reversible") {
+        const def = getReversible(row.tool);
+        if (!def) throw new Error(`no reversible() tool named "${row.tool}" is loaded`);
+        const value = await def.undo(row.input as any, row.output as any, makeCtx(row.rowId, idemKey(store, row.rowId, "undo"), retry));
+        return isConflict(value) ? { conflict: value.current } : { ok: true, output: value ?? null };
+      }
+      return reverseAdapter(store, row, retry);
+    });
     if ("conflict" in outcome) {
-      store.transition(rowId, "running", "conflict", { current: outcome.conflict });
+      if (!store.transition(rowId, "running", "conflict", { current: outcome.conflict })) return settled(store, rowId);
       return { status: "conflict", rowId, current: outcome.conflict };
     }
-    store.transition(rowId, "running", "undone");
+    if (!store.transition(rowId, "running", "undone")) return settled(store, rowId);
     recordInverse(store, row, actor, `reversed ${row.summary}`, outcome.output);
     return { status: "undone", rowId };
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
-    store.transition(rowId, "running", "done", { error });
+    // Back to done so it can be tried again; `undoStarted` stays set, so the next try is a retry.
+    if (!store.transition(rowId, "running", "done", { error })) return settled(store, rowId);
     return { status: "failed", rowId, error };
   }
 }

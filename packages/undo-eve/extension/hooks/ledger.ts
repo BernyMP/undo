@@ -76,7 +76,7 @@ export default defineHook({
       const output = data.output ?? observed?.output;
       const outcome: string = data.outcome ?? observed?.state;
       if (outcome === "completed") {
-        store.update(row.rowId, { output });
+        if (row.output == null) store.update(row.rowId, { output });
         if (row.state === "requested") {
           const next = row.kind === "write" ? "irreversible" : "done";
           store.transition(row.rowId, "requested", next);
@@ -87,7 +87,8 @@ export default defineHook({
           output,
         });
       } else if (outcome === "failed" || outcome === "interrupted") {
-        const error = typeof data.error === "string" ? data.error : (data.error?.message ?? JSON.stringify(data.error ?? outcome));
+        const detail = typeof data.error === "string" ? data.error : (data.error?.message ?? JSON.stringify(data.error ?? outcome));
+        const error = outcome === "interrupted" ? `interrupted: it may have partly run (${detail})` : detail;
         store.transition(row.rowId, ["requested", "awaiting_person"], "failed", { error });
       }
     },
