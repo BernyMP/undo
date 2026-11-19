@@ -1,0 +1,22 @@
+{
+  "name": "undo-fakes",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local fakes for Stripe and Resend that behave like test mode. No network, no money.",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "start": "node src/main.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "24.x",
+    "typescript": "7.0.2",
+    "vitest": "5.1.1"
+  }
+}

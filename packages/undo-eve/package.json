@@ -1,0 +1,56 @@
+{
+  "name": "undo-eve",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "undo for eve agents: records every call, holds or reverses risky actions, and undoes them in one click or one sentence.",
+  "license": "MIT",
+  "eve": {
+    "extension": {
+      "source": "./extension",
+      "dist": "./dist/extension"
+    }
+  },
+  "files": ["dist", "extension", "src"],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.mjs"
+    },
+    "./tools": {
+      "types": "./dist/tools/index.d.ts",
+      "default": "./dist/tools/index.mjs"
+    },
+    "./agent": {
+      "types": "./src/agent.ts",
+      "default": "./src/agent.ts"
+    },
+    "./testing": {
+      "types": "./src/testing.ts",
+      "default": "./src/testing.ts"
+    }
+  },
+  "scripts": {
+    "build": "eve extension build",
+    "prepare": "eve extension build",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "24.x",
+    "eve": "1.1.0",
+    "ai": "7.0.177",
+    "typescript": "7.0.2",
+    "undo-fakes": "workspace:*",
+    "vitest": "5.1.1"
+  },
+  "peerDependencies": {
+    "eve": "*"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}
