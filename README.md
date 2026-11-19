@@ -5,28 +5,29 @@ AI agents now take real actions, like purchases, refunds and emails, and when th
 undo is an [eve](https://eve.dev) extension, built on Vercel.
 
 ```bash
-pnpm add undo-eve
+pnpm add undo-eve   # working name; not published yet
 ```
 
 ```ts
-// agent/extensions/undo.ts
-import undo from "undo-eve";
-export default undo({ hold: "2m", defaultApprove: "agent" });
+// agent/extensions/undo.ts  (the filename must be undo.ts)
+import { undo } from "undo-eve/agent";
+export default undo({ hold: "2m", adapters: { stripe: "stripe", resend: "resend" } });
 ```
 
 ```ts
 // agent/agent.ts: add undo's policy
-import { undoPolicy } from "undo-eve";
+import { undoPolicy } from "undo-eve/agent";
 export default defineAgent({ model: "anthropic/claude-sonnet-5-5", approval: undoPolicy() });
 ```
 
-- **Records everything**: every call your agent makes, including connection tools and subagents.
-- **Cancel or reverse**: risky actions wait a short hold you can cancel; done actions are reversed with a compensating action; anything that can't be reversed is marked before it runs.
-- **Agents check agents**: a reviewer agent approves or blocks held actions. A person approves only where you ask.
-- **One click or one sentence**: an Undo button on every action, or "undo the refund to Alice" in Slack. Your agent can undo its own mistakes too.
-- **Vercel all the way**: eve, Vercel Workflow, Vercel Connect (Stripe, Resend, Slack and the rest of its catalog), AI Gateway, Agent Runs.
+- **Records every call** your agent makes, including connection tools. A subagent's own calls are recorded in full when it mounts undo too.
+- **Cancel or reverse**: risky actions wait a short hold you can cancel; done actions are reversed with a compensating action; anything that can't be reversed is labelled before it runs.
+- **Agents check agents**: a reviewer approves or blocks writes before they run. A person approves only where you set `approve: "human"`.
+- **One click or one sentence**: an Undo button on every row of the ledger page, or "cancel the email to Bob". Your agent can undo its own mistakes with `undo__undo`.
+- **Your own tools**: wrap a tool in `reversible({ do, undo })` and it gets the same Undo button.
+- **Built on Vercel**: eve, Vercel Connect (Stripe, Resend and the rest of its catalog) and AI Gateway.
 
-Status: design. The MVP spec is in [docs/mvp.md](docs/mvp.md).
+Status: design. The MVP spec is in [docs/mvp.md](docs/mvp.md); the review rounds are in [docs/council.md](docs/council.md).
 
 ## License
 
