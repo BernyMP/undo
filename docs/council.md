@@ -12,6 +12,10 @@ Members: Claude Opus 5.5 (high effort) and Claude Fable 5.2 (high effort), both 
 | 2 | Claude Fable 5.2 | 9 | 8 | 8 | 8 |
 | 3 | Claude Opus 5.5 | 9 | 9 | 9 | 8 |
 | 3 | Claude Fable 5.2 | 9 | 8 | 9 | 9 |
+| 4 | Claude Opus 5.5 | 9 | 9 | 9 | 9 |
+| 4 | Claude Fable 5.2 | 9 | 9 | 9 | 9 |
+
+Round 4 met the bar: both members scored all four at 9.
 
 ## Round 1 (2026-11-19)
 
@@ -75,3 +79,18 @@ What changed for round 4:
 - A 60-second lease re-runs stuck `running` rows with the same idempotency key; the executor starts on first runtime use, never at module load; Resend's sweep reads the email's status at `undoUntil`.
 - Done #12 checks `approve: "human"` end to end; Done #3 and #11 grew a read-row check and a registry-after-restart check.
 - The default reviewer and matcher are concrete `decide` choice questions; sandbox network wording; `undo__history` hides reads and undo's own calls; "same tool and input"; `reversible()` results and contexts; a `subagents` option.
+
+## Round 4 (2026-11-19)
+
+Reviewed: docs/mvp.md and README.md at commit e52690a. Both members scored 9 on all four and said round 3's fixes hold against the eve 1.1.0 docs. Every remaining objection was marked MINOR.
+
+Minor objections, and what was done after the round:
+
+- `undo__resend_send` defaulted to approve `none`, against "otherwise another agent checks" (Opus). Now `agent`; the demo's scripted reviewer passes the Bob email, which shows why the hold still matters.
+- A subagent without undo is told to use an adapter it doesn't have (Opus). The denial now adds "If you don't have undo__stripe_refund, this write isn't allowed here".
+- Some end states were inferred from the policy's return value (both). The hook now sets them from eve's events: an approval interaction makes the row `awaiting_person`, a rejected call ends `blocked`, and a cleared call never started by turn end ends `blocked`. The hook never overwrites `held`.
+- eve built-ins (`agent`, `eve__` tools, `sleep`, `no_reply`) needed explicit handling (Fable). `agent` is in rule 5; ungated built-ins end `done`; the missing-policy warning fires only if the policy never ran.
+- Done #2 must run without spending (Fable): reworded with `mockModel` and a scripted `review`. The model id uses the dotted Gateway form.
+- The registry-after-restart claim needed a spike without the tool import (Fable). Already run in round 2's spike: the route saw the `reversible()` tool before any turn, with a mount file that didn't import it. Done #11 checks it in the build.
+- Kept: `undo__stripe_capture` (Opus suggested cutting it). It was already built and tested by then, and it is the only adapter with a reverse strategy.
+- Wording: `undo__history` hides only reads and its own calls; adapters keyed in `approve` by their `undo__` names; subagents reuse the root's config; the fakes ship as their own package; Done #11 says the held action runs on the first API read after a restart.

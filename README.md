@@ -17,7 +17,7 @@ export default undo({ hold: "2m", adapters: { stripe: "stripe", resend: "resend"
 ```ts
 // agent/agent.ts: add undo's policy
 import { undoPolicy } from "undo-eve/agent";
-export default defineAgent({ model: "anthropic/claude-sonnet-5-5", approval: undoPolicy() });
+export default defineAgent({ model: "anthropic/claude-sonnet-5.5", approval: undoPolicy() });
 ```
 
 - **Records every call** your agent makes, including connection tools. A subagent's own calls are recorded in full when it mounts undo too.

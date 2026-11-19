@@ -36,6 +36,7 @@ export function toSummary(r: Row): RowSummary {
 export async function decide(call: PolicyCall): Promise<PolicyStatus> {
   const cfg = getConfig();
   if (!cfg) return { type: "denied", reason: 'undo is not mounted: mount undo with `undo()` from "undo-eve/agent" in agent/extensions/undo.ts' };
+  (globalThis as any)[Symbol.for("undo-eve.policy-ran")] = true;
   const store = await getStore();
   const sessionId = call.session.id;
 

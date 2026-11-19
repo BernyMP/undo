@@ -14,6 +14,27 @@ export default defineHook({
       const text = parts.filter((p) => p.kind === "text" && p.text).map((p) => p.text).join("\n");
       if (text) (await getStore()).addMessage(ctx.session.id, text);
     },
+    async "interaction.opened"(event, ctx) {
+      // A tool's own stricter approval paused this call for a person.
+      if (!getConfig()) return;
+      const data = (event as any).data ?? {};
+      if (data.request?.kind !== "approval") return;
+      const callId = data.call?.callId ?? data.subject?.callId ?? data.request?.callId;
+      if (!callId) return;
+      const store = await getStore();
+      const row = store.getByCall(ctx.session.id, callId);
+      if (row) store.transition(row.rowId, "requested", "awaiting_person");
+    },
+    async "turn.settled"(_event, ctx) {
+      // A call the policy cleared but eve never started (the turn ended first).
+      if (!getConfig()) return;
+      const store = await getStore();
+      for (const row of store.list({ sessionId: ctx.session.id, limit: 200 })) {
+        if (row.state === "requested" || row.state === "awaiting_person") {
+          store.transition(row.rowId, ["requested", "awaiting_person"], "blocked", { reviewReason: row.reviewReason ?? "never ran: the turn ended first" });
+        }
+      }
+    },
     async "call.settled"(event, ctx) {
       if (!getConfig()) return;
       const data = (event as any).data ?? {};
@@ -36,7 +57,7 @@ export default defineHook({
             approve: "none",
             state: "requested",
           });
-        } else if (!warned) {
+        } else if (!warned && !(globalThis as any)[Symbol.for("undo-eve.policy-ran")]) {
           warned = true;
           console.warn("[undo] undoPolicy is not set in agent.ts: calls are recorded after they run, without review. Add `approval: undoPolicy()`.");
         }

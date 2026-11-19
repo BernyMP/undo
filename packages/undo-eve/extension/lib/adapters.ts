@@ -55,7 +55,7 @@ export const ADAPTERS: AdapterDef[] = [
     tool: "undo__resend_send",
     service: "resend",
     strategy: "cancel",
-    defaultApprove: "none",
+    defaultApprove: "agent",
     covers: ["send_email"],
     summary: (i) => `email ${i?.to}: "${i?.subject}"`,
   },

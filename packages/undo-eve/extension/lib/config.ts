@@ -75,6 +75,14 @@ export function parseDuration(value: string | number | undefined, fallback: numb
 }
 
 export function setConfig(config: UndoConfig): ResolvedConfig {
+  // A subagent mounting undo() with no options reuses the root agent's config.
+  const existing = getConfig();
+  if (existing && Object.keys(config).length === 0) return existing;
+  for (const tool of Object.keys(config.approve ?? {})) {
+    if (/^[a-z0-9_-]+__(create_refund|capture_payment_intent|send_email)$/.test(tool)) {
+      console.warn(`[undo] approve.${tool} is ignored: undo redirects that call to its adapter. Key it by the adapter's name, e.g. undo__stripe_refund.`);
+    }
+  }
   const resolved: ResolvedConfig = {
     ...config,
     holdMs: parseDuration(config.hold, 120_000),

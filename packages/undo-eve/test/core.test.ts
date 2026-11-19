@@ -85,7 +85,7 @@ describe("classify (precedence)", () => {
     const cfg = setConfig(config({ reads: ["crm__lookup"], subagents: ["researcher"], approve: { notify: "human" } }));
     expect(classify(cfg, { toolName: "undo__history" }).kind).toBe("undo");
     expect(classify(cfg, { toolName: "undo__stripe_refund" })).toMatchObject({ kind: "adapter", strategy: "cancel", approve: "agent" });
-    expect(classify(cfg, { toolName: "stripe__create_refund" })).toMatchObject({ kind: "deny", reason: "use undo__stripe_refund; it can be undone for 300ms" });
+    expect(classify(cfg, { toolName: "stripe__create_refund" })).toMatchObject({ kind: "deny", reason: expect.stringMatching(/^use undo__stripe_refund; it can be undone for 300ms/) });
     expect(classify(cfg, { toolName: "stripe__retrieve_customer" }).kind).toBe("read");
     expect(classify(cfg, { toolName: "other__thing", toolAnnotations: { readOnlyHint: true } }).kind).toBe("read");
     expect(classify(cfg, { toolName: "crm__lookup" }).kind).toBe("read");
@@ -99,7 +99,7 @@ describe("classify (precedence)", () => {
 describe("undoPolicy", () => {
   it("denies a direct write an adapter covers, with the adapter's name", async () => {
     const { ctx, status } = await call("stripe__create_refund", { payment_intent: "pi_bob" });
-    expect(status).toEqual({ type: "denied", reason: "use undo__stripe_refund; it can be undone for 300ms" });
+    expect(status).toMatchObject({ type: "denied", reason: expect.stringMatching(/^use undo__stripe_refund; it can be undone for 300ms/) });
     const row = (await getStore()).getByCall("s1", ctx.callId)!;
     expect(row.state).toBe("blocked");
   });

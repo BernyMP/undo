@@ -31,7 +31,7 @@ export const EVE_READS = new Set([
 ]);
 export const EVE_SANDBOX = new Set(["bash", "write_file", "edit_file"]);
 /** eve doesn't send these to the approval policy; the hook records them. */
-export const UNGATED = new Set(["eve__search", "eve__skill", "eve__task_wait", "eve__task_cancel", "ask_question", "no_reply", "sleep"]);
+export const UNGATED = { has: (name: string) => name.startsWith("eve__") || ["ask_question", "no_reply", "sleep", "web_search"].includes(name) };
 export const UNDO_OWN = new Set(["undo__history", "undo__undo"]);
 
 export type Classification =
@@ -68,7 +68,12 @@ export function classify(
     if (!conn) continue;
     if (a.covers.some((w) => toolName === `${conn}__${w}`)) {
       const terms = a.strategy === "cancel" ? `it can be undone for ${holdText(cfg.holdMs)}` : "it can be undone later";
-      return { kind: "deny", reason: `use ${a.tool}; ${terms}`, strategy: "none", approve: "none" };
+      return {
+        kind: "deny",
+        reason: `use ${a.tool}; ${terms}. If you don't have ${a.tool}, this write isn't allowed here.`,
+        strategy: "none",
+        approve: "none",
+      };
     }
   }
 
@@ -80,6 +85,7 @@ export function classify(
   if (
     call.toolAnnotations?.readOnlyHint === true ||
     EVE_READS.has(toolName) ||
+    toolName.startsWith("eve__") ||
     serviceReads.includes(toolName) ||
     cfg.reads.includes(toolName)
   ) {
